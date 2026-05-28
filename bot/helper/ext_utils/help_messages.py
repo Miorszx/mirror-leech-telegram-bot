@@ -330,6 +330,7 @@ YT_HELP_DICT = {
     "Thumb-Layout": thumbnail_layout,
     "Leech-Type": leech_as,
     "FFmpeg-Cmds": ffmpeg_cmds,
+    "BuzzHeavier": buzzheavier_arg,
 }
 
 GDL_HELP_DICT = {
@@ -353,6 +354,7 @@ GDL_HELP_DICT = {
     "Thumb-Layout": thumbnail_layout,
     "Leech-Type": leech_as,
     "FFmpeg-Cmds": ffmpeg_cmds,
+    "BuzzHeavier": buzzheavier_arg,
 }
 
 MIRROR_HELP_DICT = {

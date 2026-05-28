@@ -67,6 +67,7 @@ class GalleryDL(TaskListener):
             "-hl": False,
             "-bt": False,
             "-ut": False,
+            "-bh": False,
             "-i": 0,
             "-sp": 0,
             "link": "",
@@ -119,6 +120,7 @@ class GalleryDL(TaskListener):
         self.folder_name = f"/{args['-m']}".rstrip("/") if len(args["-m"]) > 0 else ""
         self.bot_trans = args["-bt"]
         self.user_trans = args["-ut"]
+        self.is_buzzheavier = args["-bh"]
 
         is_bulk = args["-b"]
 
