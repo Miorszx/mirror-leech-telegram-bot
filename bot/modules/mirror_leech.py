@@ -357,7 +357,8 @@ class Mirror(TaskListener):
                 self.is_jd = False
 
         if (
-            not self.is_jd
+            isinstance(self.link, str)
+            and not self.is_jd
             and not self.is_nzb
             and not self.is_qbit
             and not is_magnet(self.link)
