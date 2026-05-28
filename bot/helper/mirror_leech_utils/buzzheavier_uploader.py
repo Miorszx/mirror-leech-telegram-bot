@@ -19,8 +19,8 @@ from aiofiles import open as aiopen
 from httpx import AsyncClient, HTTPError, Limits, Timeout
 
 from ...core.config_manager import Config
-from ...ext_utils.status_utils import get_readable_file_size
-from ...ext_utils.telegraph_helper import telegraph
+from ..ext_utils.status_utils import get_readable_file_size
+from ..ext_utils.telegraph_helper import telegraph
 from ..telegram_helper.message_utils import send_message
 
 
