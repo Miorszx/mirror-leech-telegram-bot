@@ -3,8 +3,9 @@ from aiofiles.os import path as aiopath
 from base64 import b64encode
 from os.path import basename as ospath_basename
 from re import match as re_match
+from secrets import token_urlsafe
 
-from .. import LOGGER, bot_loop, task_dict_lock, DOWNLOAD_DIR
+from .. import LOGGER, bot_loop, task_dict, task_dict_lock, DOWNLOAD_DIR
 from ..helper.ext_utils.bot_utils import (
     get_content_type,
     sync_to_async,
@@ -29,6 +30,9 @@ from ..helper.mirror_leech_utils.download_utils.alldebrid_resolver import (
     alldebrid_resolve_magnet,
     alldebrid_resolve_torrent,
 )
+from ..helper.mirror_leech_utils.status_utils.alldebrid_status import (
+    AllDebridMagnetStatus,
+)
 from ..helper.mirror_leech_utils.download_utils.direct_downloader import (
     add_direct_download,
 )
@@ -45,7 +49,11 @@ from ..helper.mirror_leech_utils.download_utils.rclone_download import (
 from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
-from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
+from ..helper.telegram_helper.message_utils import (
+    send_message,
+    get_tg_link_message,
+    send_status_message,
+)
 
 
 class Mirror(TaskListener):
@@ -320,11 +328,44 @@ class Mirror(TaskListener):
         if self.is_alldebrid and (
             is_magnet(self.link) or self.link.endswith(".torrent")
         ):
+            # Shared mutable state used by the status object and the
+            # resolver's progress callback. Registered into ``task_dict``
+            # before polling starts so the user can /status the task and
+            # see real AllDebrid torrenting progress instead of waiting
+            # silently until a 180s no-seed timeout fires.
+            ad_state: dict = {
+                "phase": "torrent",
+                "name": self.name or "Resolving via AllDebrid",
+                "size": 0,
+                "downloaded": 0,
+                "downloadSpeed": 0,
+                "seeders": 0,
+                "downloaders": 0,
+                "statusCode": 0,
+                "status": "Submitting",
+            }
+            ad_gid = token_urlsafe(10)
+            ad_status = AllDebridMagnetStatus(self, ad_gid, ad_state)
+            async with task_dict_lock:
+                task_dict[self.mid] = ad_status
+            await self.on_download_start()
+            if self.multi <= 1 and not self.is_rss:
+                await send_status_message(self.message)
+
+            async def _ad_progress(snapshot: dict):
+                # Update the shared state in-place so the renderer
+                # (which reads on every refresh) picks up the new
+                # numbers without restarting.
+                if not isinstance(snapshot, dict):
+                    return
+                ad_state.update(snapshot)
+
             try:
                 if is_magnet(self.link):
                     LOGGER.info("AllDebrid magnet route")
                     resolved = await alldebrid_resolve_magnet(
                         self.link,
+                        progress_callback=_ad_progress,
                         is_cancelled=lambda: self.is_cancelled,
                     )
                 else:
@@ -334,20 +375,30 @@ class Mirror(TaskListener):
                     resolved = await alldebrid_resolve_torrent(
                         torrent_bytes,
                         ospath_basename(self.link),
+                        progress_callback=_ad_progress,
                         is_cancelled=lambda: self.is_cancelled,
                     )
             except DirectDownloadLinkException as e:
                 msg = str(e)
                 LOGGER.info(msg)
+                async with task_dict_lock:
+                    task_dict.pop(self.mid, None)
                 if msg.startswith("ERROR:"):
                     await send_message(self.message, msg)
                     await self.remove_from_same_dir()
                     return
                 resolved = None
             except Exception as e:
+                async with task_dict_lock:
+                    task_dict.pop(self.mid, None)
                 await send_message(self.message, e)
                 await self.remove_from_same_dir()
                 return
+            else:
+                # Tear down the placeholder status; ``add_direct_download``
+                # is about to register its own ``DirectStatus``.
+                async with task_dict_lock:
+                    task_dict.pop(self.mid, None)
             if isinstance(resolved, dict):
                 self._alldebrid_magnet_id = resolved.get("magnet_id", 0)
                 self.link = resolved
