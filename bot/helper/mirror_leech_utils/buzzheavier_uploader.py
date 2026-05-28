@@ -179,15 +179,22 @@ class BuzzHeavierUploader:
         return f"https://buzzheavier.com/{file_id}"
 
     async def upload(self) -> None:
-        files: list[str] = []
+        files: list[tuple[str, str]] = []
+        # ``rel_name`` keeps the directory structure relative to the
+        # download root so the final Telegraph index can disambiguate
+        # files that share a basename (e.g. ``Season 01/E01.mkv`` vs
+        # ``Season 02/E01.mkv``).
         if ospath.isfile(self._path):
-            files.append(self._path)
+            files.append((self._path, ospath.basename(self._path)))
         else:
+            base = self._path.rstrip("/")
             for root, _, names in walk(self._path):
                 for name in sorted(names):
                     candidate = ospath.join(root, name)
-                    if ospath.isfile(candidate):
-                        files.append(candidate)
+                    if not ospath.isfile(candidate):
+                        continue
+                    rel = ospath.relpath(candidate, base)
+                    files.append((candidate, rel))
 
         if not files:
             await self._listener.on_upload_error(
@@ -203,7 +210,7 @@ class BuzzHeavierUploader:
                 timeout=_HTTP_TIMEOUT,
                 limits=Limits(max_connections=4, max_keepalive_connections=2),
             ) as client:
-                for file_path in files:
+                for file_path, rel_name in files:
                     if self._listener.is_cancelled:
                         await self._listener.on_upload_error(
                             "BuzzHeavier upload cancelled by user"
@@ -213,15 +220,14 @@ class BuzzHeavierUploader:
                         link = await self._upload_one(client, file_path)
                     except (HTTPError, RuntimeError) as exc:
                         LOGGER.error(
-                            f"BuzzHeavier upload error for "
-                            f"{ospath.basename(file_path)}: {exc}"
+                            f"BuzzHeavier upload error for {rel_name}: {exc}"
                         )
                         self._error = str(exc)
                         await self._listener.on_upload_error(
                             f"BuzzHeavier: {exc}"
                         )
                         return
-                    self._files_dict[link] = ospath.basename(file_path)
+                    self._files_dict[link] = rel_name
                     if not first_link:
                         first_link = link
         except Exception as exc:  # pragma: no cover - safety net
