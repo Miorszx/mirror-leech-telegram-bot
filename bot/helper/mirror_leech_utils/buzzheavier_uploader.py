@@ -19,9 +19,7 @@ from aiofiles import open as aiopen
 from httpx import AsyncClient, HTTPError, Limits, Timeout
 
 from ...core.config_manager import Config
-from ..ext_utils.status_utils import get_readable_file_size
 from ..ext_utils.telegraph_helper import telegraph
-from ..telegram_helper.message_utils import send_message
 
 
 LOGGER = getLogger(__name__)
@@ -244,16 +242,14 @@ class BuzzHeavierUploader:
         # Mirror branch in ``TaskListener.on_upload_complete`` only
         # renders a single ``link`` button -- the ``files`` dict is
         # ignored unless ``self.is_leech``. For multi-file BuzzHeavier
-        # uploads we therefore publish the full link list ourselves so
-        # the user does not lose visibility on the rest of the files.
+        # uploads we therefore publish a Telegraph index page that
+        # lists every file, then hand its URL to the listener so the
+        # final "Cloud Link" button opens that index instead of the
+        # first BuzzHeavier link.
         primary_link = first_link
         if self._total_files > 1:
-            await self._post_multi_file_listing()
             telegraph_url = await self._build_telegraph_index()
             if telegraph_url:
-                # Hand a single index URL to the listener so the final
-                # "Task Done" message links to the Telegraph page that
-                # lists every BuzzHeavier file.
                 primary_link = telegraph_url
 
         await self._listener.on_upload_complete(
@@ -264,42 +260,6 @@ class BuzzHeavierUploader:
         )
 
     # ── multi-file rendering helpers ────────────────────────────────
-
-    async def _post_multi_file_listing(self) -> None:
-        """Send the full list of BuzzHeavier links to the user chat.
-
-        Telegram tolerates ~4096 chars per message. We chunk so a
-        torrent with hundreds of files still fans out cleanly.
-        """
-        if not self._files_dict:
-            return
-
-        header = (
-            f"<b>BuzzHeavier links</b> ({len(self._files_dict)} files)\n"
-            f"<b>Name:</b> <code>{escape(self._listener.name)}</code>\n\n"
-        )
-
-        chunk = header
-        index = 0
-        for link, name in self._files_dict.items():
-            index += 1
-            entry = f"{index}. <a href='{link}'>{escape(name)}</a>\n"
-            if len(chunk.encode()) + len(entry.encode()) > 3800:
-                try:
-                    await send_message(self._listener.message, chunk)
-                except Exception as exc:
-                    LOGGER.warning(f"BuzzHeavier listing send failed: {exc}")
-                # Subsequent chunks omit the header so we do not repeat
-                # the name on every message.
-                chunk = entry
-                continue
-            chunk += entry
-
-        if chunk:
-            try:
-                await send_message(self._listener.message, chunk)
-            except Exception as exc:
-                LOGGER.warning(f"BuzzHeavier listing send failed: {exc}")
 
     async def _build_telegraph_index(self) -> str:
         """Create a Telegraph page that indexes every BuzzHeavier link.
