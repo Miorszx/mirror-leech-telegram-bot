@@ -440,6 +440,19 @@ class Mirror(TaskListener):
                 # picks ``add_direct_download``.
                 self.is_qbit = False
                 self.is_jd = False
+                # The status message we issued before polling is still
+                # the one in the chat. ``add_direct_download`` would
+                # otherwise call ``send_status_message`` again, which
+                # deletes our message and posts a fresh one --
+                # producing the flicker the user complained about.
+                # Re-using the ``is_rss`` short-circuit (the same gate
+                # that downloaders honour for RSS-triggered tasks)
+                # tells ``add_direct_download`` to keep the existing
+                # status row and just edit it in place via the
+                # periodic refresher. The flag has no other observable
+                # effect on this task: it only gates the redundant
+                # ``send_status_message`` calls in the download utils.
+                self.is_rss = True
 
         if (
             isinstance(self.link, str)
