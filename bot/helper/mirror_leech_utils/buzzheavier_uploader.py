@@ -8,6 +8,7 @@ calling ``listener.on_upload_complete``.
 
 from __future__ import annotations
 
+import asyncio
 from logging import getLogger
 from os import walk, path as ospath
 from time import time
@@ -24,6 +25,8 @@ LOGGER = getLogger(__name__)
 _UPLOAD_BASE = "https://w.buzzheavier.com"
 _UPLOAD_CHUNK = 16 * 1024 * 1024  # 16 MiB read window
 _HTTP_TIMEOUT = Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)
+_RETRY_STATUS = {429, 500, 502, 503, 504, 520, 522, 524}
+_MAX_UPLOAD_RETRIES = 4
 
 
 def _auth_headers() -> dict[str, str]:
@@ -80,6 +83,15 @@ class BuzzHeavierUploader:
                 yield chunk
 
     async def _upload_one(self, client: AsyncClient, file_path: str) -> str:
+        """PUT a single file with retry on 5xx / 429 / network errors.
+
+        BuzzHeavier occasionally answers a brief 503 ("Service
+        Unavailable") during edge restarts; the previous one-shot
+        attempt failed the whole task instead of waiting it out. We
+        now retry up to ``_MAX_UPLOAD_RETRIES`` times with
+        capped exponential backoff, resetting the on-disk read each
+        attempt so the progress bar stays consistent.
+        """
         file_name = ospath.basename(file_path)
         file_size = ospath.getsize(file_path)
         url = f"{_UPLOAD_BASE}/{file_name}"
@@ -90,15 +102,63 @@ class BuzzHeavierUploader:
         }
 
         LOGGER.info(f"Uploading to BuzzHeavier: {file_name} ({file_size} bytes)")
-        response = await client.put(
-            url,
-            content=self._stream_file(file_path, file_size),
-            headers=headers,
-        )
-        if response.status_code not in (200, 201):
+
+        last_error: str = ""
+        sent_before_attempt = self._processed_bytes
+        response = None
+
+        for attempt in range(1, _MAX_UPLOAD_RETRIES + 1):
+            if self._listener.is_cancelled:
+                raise RuntimeError("Cancelled before BuzzHeavier upload finished")
+            # Each retry restarts the stream from byte 0, so reset the
+            # progress counter so the bar does not double-count.
+            self._processed_bytes = sent_before_attempt
+            try:
+                response = await client.put(
+                    url,
+                    content=self._stream_file(file_path, file_size),
+                    headers=headers,
+                )
+            except HTTPError as exc:
+                last_error = str(exc)
+                if attempt >= _MAX_UPLOAD_RETRIES:
+                    raise RuntimeError(
+                        f"BuzzHeavier network error after {attempt} attempts: {exc}"
+                    ) from exc
+                wait = min(30, 2 ** attempt)
+                LOGGER.warning(
+                    f"BuzzHeavier {file_name} attempt {attempt} hit network error "
+                    f"({exc}); retrying in {wait}s"
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            if response.status_code in (200, 201):
+                break
+
+            last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+            if (
+                response.status_code in _RETRY_STATUS
+                and attempt < _MAX_UPLOAD_RETRIES
+            ):
+                wait = min(30, 2 ** attempt)
+                LOGGER.warning(
+                    f"BuzzHeavier {file_name} attempt {attempt} -> "
+                    f"{response.status_code}; retrying in {wait}s"
+                )
+                await asyncio.sleep(wait)
+                continue
+
             raise RuntimeError(
                 f"BuzzHeavier upload failed [{response.status_code}]: "
                 f"{response.text[:200]}"
+            )
+        else:
+            # Loop exhausted without ``break`` -- every attempt was a
+            # retryable status that we ran out of patience for.
+            raise RuntimeError(
+                f"BuzzHeavier upload failed after {_MAX_UPLOAD_RETRIES} attempts: "
+                f"{last_error or 'unknown error'}"
             )
 
         try:
