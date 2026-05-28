@@ -107,6 +107,10 @@ async def _call_api(
 
     Raises ``DirectDownloadLinkException`` on HTTP/JSON/business errors so
     the existing ``mirror_leech`` flow can surface a friendly message.
+
+    Note: ``data`` is always a ``dict``. ``httpx`` (>=0.28) treats
+    list-of-tuples as a streaming sync iterable, not form-urlencoded, so
+    we pass repeated keys via ``{"name[]": [v1, v2]}`` instead.
     """
     headers = {"User-Agent": _USER_AGENT}
     try:
@@ -327,12 +331,13 @@ def _flatten_files(
     return result
 
 
-async def _post_form(url: str, fields: list[tuple[str, Any]]) -> dict[str, Any]:
-    """POST to the AllDebrid API with a multi-value form payload.
+async def _post_form(url: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """POST to the AllDebrid API with a form-urlencoded payload.
 
-    ``httpx`` accepts ``data`` as a list of ``(key, value)`` tuples,
-    which lets us emit repeated keys like ``magnets[]`` without
-    aiohttp's ``FormData`` helper.
+    ``fields`` must be a ``dict``; use ``{"name[]": [v1, v2]}`` for the
+    repeated keys AllDebrid expects (``magnets[]``, ``ids[]``, ...).
+    httpx >= 0.28 treats list-of-tuples as a streaming sync iterable,
+    not form data, so the dict form is required.
     """
     api_key = _ensure_api_key()
     params = {"agent": _AGENT, "apikey": api_key}
@@ -361,7 +366,7 @@ async def upload_magnet(magnet: str) -> dict[str, Any]:
             )
             data = await _post_form(
                 f"{_API_BASE_V4}/magnet/upload",
-                [("magnets[]", candidate)],
+                {"magnets[]": [candidate]},
             )
             magnets = data.get("magnets") or []
             if not magnets:
@@ -427,7 +432,7 @@ async def get_magnet_status(magnet_id: int) -> dict[str, Any]:
     """Single-magnet status lookup against ``/v4.1/magnet/status``."""
     data = await _post_form(
         f"{_API_BASE}/magnet/status",
-        [("id", str(magnet_id))],
+        {"id": str(magnet_id)},
     )
     magnets = data.get("magnets")
     if not magnets:
@@ -448,7 +453,7 @@ async def delete_magnet(magnet_id: int) -> bool:
     try:
         await _post_form(
             f"{_API_BASE_V4}/magnet/delete",
-            [("ids[]", str(magnet_id))],
+            {"ids[]": [str(magnet_id)]},
         )
         LOGGER.info(f"Deleted AllDebrid magnet {magnet_id}")
         return True
@@ -465,7 +470,7 @@ async def get_magnet_files(magnet_id: int) -> list[dict[str, Any]]:
     """
     data = await _post_form(
         f"{_API_BASE_V4}/magnet/files",
-        [("id[]", str(magnet_id))],
+        {"id[]": [str(magnet_id)]},
     )
     magnets = data.get("magnets") or []
     if not magnets:
@@ -488,7 +493,7 @@ async def _unlock_alldebrid_link(link: str) -> dict[str, Any]:
         "POST",
         f"{_API_BASE_V4}/link/unlock",
         params=params,
-        data=[("link", link)],
+        data={"link": link},
     )
 
 
