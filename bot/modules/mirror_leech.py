@@ -328,6 +328,12 @@ class Mirror(TaskListener):
         if self.is_alldebrid and (
             is_magnet(self.link) or self.link.endswith(".torrent")
         ):
+            # Tell the status renderer this is a torrent-shaped task so
+            # the ``Seeders | Leechers`` row appears (AllDebrid only
+            # exposes ``seeders``, leechers stay at 0). Without this
+            # the renderer falls back to the plain row and hides the
+            # peer count entirely.
+            self.is_torrent = True
             # Shared mutable state used by the status object and the
             # resolver's progress callback. Registered into ``task_dict``
             # before polling starts so the user can /status the task and
