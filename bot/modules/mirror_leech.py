@@ -377,11 +377,30 @@ class Mirror(TaskListener):
                     )
                 else:
                     LOGGER.info(f"AllDebrid torrent file route: {self.link}")
-                    async with aiopen(self.link, "rb") as fh:
-                        torrent_bytes = await fh.read()
+                    if self.link.startswith(("http://", "https://")):
+                        # ``.torrent`` URLs (nyaa, 1337x mirror, etc.)
+                        # need to be fetched as bytes before AllDebrid
+                        # accepts them via ``/v4/magnet/upload/file``.
+                        from httpx import AsyncClient
+
+                        async with AsyncClient(timeout=60.0) as client:
+                            response = await client.get(self.link)
+                            response.raise_for_status()
+                            torrent_bytes = response.content
+                        torrent_name = (
+                            ospath_basename(self.link.split("?", 1)[0])
+                            or "torrent.torrent"
+                        )
+                    else:
+                        # Replied ``.torrent`` files land as local paths
+                        # under ``DOWNLOAD_DIR`` after the upstream
+                        # ``reply_to.download()`` call.
+                        async with aiopen(self.link, "rb") as fh:
+                            torrent_bytes = await fh.read()
+                        torrent_name = ospath_basename(self.link)
                     resolved = await alldebrid_resolve_torrent(
                         torrent_bytes,
-                        ospath_basename(self.link),
+                        torrent_name,
                         progress_callback=_ad_progress,
                         is_cancelled=lambda: self.is_cancelled,
                     )
