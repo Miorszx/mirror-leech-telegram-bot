@@ -348,9 +348,15 @@ class Mirror(TaskListener):
             ad_status = AllDebridMagnetStatus(self, ad_gid, ad_state)
             async with task_dict_lock:
                 task_dict[self.mid] = ad_status
+            # Note: we deliberately do NOT call ``send_status_message``
+            # here. The status row is registered into ``task_dict`` so
+            # the periodic interval refresher (or an existing /status
+            # message in the chat) will pick it up. ``add_direct_download``
+            # later issues the single ``send_status_message`` for the
+            # combined task lifecycle, so doing it twice would delete
+            # and recreate the message on every refresh and look like a
+            # flicker to the user.
             await self.on_download_start()
-            if self.multi <= 1 and not self.is_rss:
-                await send_status_message(self.message)
 
             async def _ad_progress(snapshot: dict):
                 # Update the shared state in-place so the renderer
