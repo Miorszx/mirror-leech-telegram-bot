@@ -355,18 +355,17 @@ class Mirror(TaskListener):
             async with task_dict_lock:
                 task_dict[self.mid] = ad_status
             await self.on_download_start()
-            # Don't issue ``send_status_message`` here. ``send_status_message``
-            # always does delete-old-then-send-new whenever ``sid`` is
-            # already in ``status_dict``, so calling it now and again
-            # from ``add_direct_download`` after the resolver returns
-            # makes the chat message flicker (delete + recreate twice
-            # in rapid succession). The original mltb flow only sends
-            # the status message once per task lifecycle, so we match
-            # that: ``add_direct_download`` will issue the one and
-            # only ``send_status_message`` once it takes over. During
-            # AllDebrid polling the user can type ``/status`` manually
-            # to surface the ``AllDebridMagnetStatus`` row that was
-            # already registered above.
+            # Surface the AllDebrid polling status immediately so the
+            # user sees torrenting progress (seeders, downloaded bytes,
+            # speed) instead of staring at a silent chat for up to 3
+            # minutes before the no-seed timeout. ``add_direct_download``
+            # later sends another ``send_status_message`` once it takes
+            # over, which deletes this one and posts a fresh row -- the
+            # single visible flicker on phase transition is the same
+            # shape mltb already uses elsewhere (Queue -> Direct etc.)
+            # and is the cost of having the polling progress visible.
+            if self.multi <= 1 and not self.is_rss:
+                await send_status_message(self.message)
 
             async def _ad_progress(snapshot: dict):
                 # Update the shared state in-place so the renderer
