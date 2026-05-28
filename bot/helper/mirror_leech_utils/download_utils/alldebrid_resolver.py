@@ -308,6 +308,14 @@ def _flatten_files(
     Folder nodes carry an ``e`` key with the children. File nodes carry
     ``n`` (name), ``s`` (size in bytes) and ``l`` (the AllDebrid ``/f/``
     link that still needs unlocking).
+
+    The ``path`` value here is the **directory** prefix (without the
+    filename) so it matches the ``add_direct_download`` contract used
+    by the rest of mltb (see ``DirectListener.download``: ``a2c_opt
+    ["dir"] = f"{base}/{content['path']}"``). Bundling the filename
+    into ``path`` would make aria2 create a folder named after the
+    file and download the bytes underneath it, breaking the original
+    folder structure of the torrent.
     """
     if result is None:
         result = []
@@ -320,10 +328,13 @@ def _flatten_files(
             _flatten_files(node["e"], result, new_prefix)
         else:
             filename = node.get("n", "unknown")
+            # Strip trailing slash and surrounding spaces; aria2 takes
+            # care of joining ``dir`` and ``out``.
+            dir_prefix = prefix.rstrip("/")
             result.append(
                 {
                     "filename": filename,
-                    "path": f"{prefix}{filename}",
+                    "path": dir_prefix,
                     "size": int(node.get("s", 0) or 0),
                     "link": node.get("l", ""),
                 }
@@ -524,7 +535,11 @@ async def _resolve_unlocked_files(
                 "filename": unlocked.get("filename")
                 or file_entry.get("filename")
                 or "file",
-                "path": file_entry.get("path") or unlocked.get("filename") or "file",
+                # ``path`` here is the directory prefix only (matches
+                # the ``DirectListener`` contract). When the file lives
+                # at the torrent root we leave it empty so aria2 saves
+                # straight under ``self._path``.
+                "path": (file_entry.get("path") or "").strip("/"),
                 "url": direct,
                 "size": int(unlocked.get("filesize") or file_entry.get("size") or 0),
                 "headers": {},
