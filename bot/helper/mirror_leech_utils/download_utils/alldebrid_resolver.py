@@ -580,6 +580,17 @@ async def alldebrid_resolve_magnet(
         loop = asyncio.get_event_loop()
         start_time = loop.time()
 
+        # Push the resolved magnet name (and announced size) to the
+        # caller's progress UI as soon as ``upload_magnet`` returns so
+        # the status row shows something meaningful instead of the
+        # placeholder name set before this function ran.
+        if progress_callback is not None:
+            await progress_callback({
+                "phase": "torrent",
+                "name": name,
+                "size": int(entry.get("size") or 0),
+            })
+
         while True:
             if is_cancelled is not None and is_cancelled():
                 raise DirectDownloadLinkException(
@@ -684,6 +695,17 @@ async def alldebrid_resolve_torrent(
         no_seed_since = 0.0
         loop = asyncio.get_event_loop()
         start_time = loop.time()
+
+        # Same broadcast-name-immediately pattern as
+        # ``alldebrid_resolve_magnet`` so /status doesn't keep showing
+        # the placeholder filename for the whole polling phase.
+        if progress_callback is not None:
+            await progress_callback({
+                "phase": "torrent",
+                "name": name,
+                "size": int(entry.get("size") or 0),
+            })
+
         while True:
             if is_cancelled is not None and is_cancelled():
                 raise DirectDownloadLinkException(
