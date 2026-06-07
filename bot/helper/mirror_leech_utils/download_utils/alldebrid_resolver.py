@@ -25,7 +25,7 @@ import urllib.parse
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
-from httpx import AsyncClient, HTTPError
+from httpx import AsyncClient, HTTPError, HTTPStatusError, RequestError
 
 from bot import LOGGER
 from bot.core.config_manager import Config
@@ -45,6 +45,11 @@ _MAGNET_POLL_INTERVAL_S = 5.0
 _MAGNET_NO_SEED_TIMEOUT_S = 180.0
 _MAGNET_MAX_DURATION_S = 7200.0  # 2h
 _MAGNET_UNLOCK_CONCURRENCY = 3
+
+# Transient upstream HTTP statuses worth a retry-with-backoff
+# (AllDebrid 503 flaps during deploys / load-balancer hiccups).
+_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504, 520, 521, 522, 524}
+_REQUEST_MAX_ATTEMPTS = 4
 
 # AllDebrid magnet ``statusCode`` values.
 _MAGNET_STATUS_READY = 4
@@ -113,24 +118,68 @@ async def _call_api(
     we pass repeated keys via ``{"name[]": [v1, v2]}`` instead.
     """
     headers = {"User-Agent": _USER_AGENT}
-    try:
-        async with AsyncClient(timeout=_TIMEOUT, headers=headers) as client:
-            request_kwargs: dict[str, Any] = {"params": params or {}}
-            if data is not None:
-                request_kwargs["data"] = data
-            if files is not None:
-                request_kwargs["files"] = files
-            response = await client.request(method, url, **request_kwargs)
-            response.raise_for_status()
-            payload = response.json()
-    except HTTPError as exc:
+    request_kwargs: dict[str, Any] = {"params": params or {}}
+    if data is not None:
+        request_kwargs["data"] = data
+    if files is not None:
+        request_kwargs["files"] = files
+
+    payload: Any = None
+    last_error: Exception | None = None
+    for attempt in range(1, _REQUEST_MAX_ATTEMPTS + 1):
+        try:
+            async with AsyncClient(timeout=_TIMEOUT, headers=headers) as client:
+                response = await client.request(method, url, **request_kwargs)
+                # AllDebrid occasionally flaps with a transient 5xx
+                # (notably 503 during deploys / LB hiccups). Retry those
+                # with exponential backoff instead of dropping the file.
+                if response.status_code in _RETRYABLE_HTTP_STATUSES:
+                    last_error = DirectDownloadLinkException(
+                        f"ERROR: AllDebrid network error: HTTP {response.status_code}"
+                    )
+                    if attempt < _REQUEST_MAX_ATTEMPTS:
+                        delay = min(8.0, attempt * 2.0)
+                        LOGGER.warning(
+                            f"AllDebrid API {method} {url} -> HTTP "
+                            f"{response.status_code} (attempt {attempt}/"
+                            f"{_REQUEST_MAX_ATTEMPTS}); retrying in {delay:.0f}s"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise last_error
+                response.raise_for_status()
+                payload = response.json()
+            break
+        except RequestError as exc:
+            # Network-level failure (timeout / reset / connect) is transient.
+            last_error = DirectDownloadLinkException(
+                f"ERROR: AllDebrid network error: {exc}"
+            )
+            if attempt < _REQUEST_MAX_ATTEMPTS:
+                delay = min(8.0, attempt * 2.0)
+                LOGGER.warning(
+                    f"AllDebrid API {method} {url} failed (attempt {attempt}/"
+                    f"{_REQUEST_MAX_ATTEMPTS}): {exc}; retrying in {delay:.0f}s"
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise last_error from exc
+        except HTTPStatusError as exc:
+            # Non-retryable status (4xx, or a 5xx outside the retry set).
+            raise DirectDownloadLinkException(
+                f"ERROR: AllDebrid network error: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise DirectDownloadLinkException(
+                f"ERROR: AllDebrid returned malformed JSON: {exc}"
+            ) from exc
+
+    if payload is None:
+        if last_error is not None:
+            raise last_error
         raise DirectDownloadLinkException(
-            f"ERROR: AllDebrid network error: {exc}"
-        ) from exc
-    except ValueError as exc:
-        raise DirectDownloadLinkException(
-            f"ERROR: AllDebrid returned malformed JSON: {exc}"
-        ) from exc
+            "ERROR: AllDebrid request failed after retries"
+        )
 
     if not isinstance(payload, dict):
         raise DirectDownloadLinkException(
