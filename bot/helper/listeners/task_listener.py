@@ -19,7 +19,7 @@ from ... import (
 from ...core.config_manager import Config
 from ...core.torrent_manager import TorrentManager
 from ..common import TaskConfig
-from ..ext_utils.bot_utils import sync_to_async
+from ..ext_utils.bot_utils import sync_to_async, get_telegraph_list
 from ..ext_utils.db_handler import database
 from ..ext_utils.files_utils import (
     get_path_size,
@@ -365,23 +365,21 @@ class TaskListener(TaskConfig):
             msg += f"\n<b>cc: </b>{self.tag}\n\n"
             if not files:
                 await send_message(self.message, msg)
-            elif self.is_buzzheavier:
-                # Render each uploaded file as an inline button (bubble),
-                # the same UX as the Gdrive/Gofile cloud-link button,
-                # instead of numbered inline text links. Telegram caps a
-                # keyboard at 100 buttons, so chunk into separate
-                # messages when a folder upload exceeds that.
-                items = list(files.items())
-                for start in range(0, len(items), 90):
-                    buttons = ButtonMaker()
-                    for link, name in items[start : start + 90]:
-                        buttons.url_button(f"☁️ {name}", link)
-                    await send_message(
-                        self.message,
-                        msg if start == 0 else f"<b>cc: </b>{self.tag}",
-                        buttons.build_menu(1),
-                    )
-                    await sleep(1)
+            elif self.is_buzzheavier and len(files) > 20:
+                # Many files: publish a Telegraph page (numbered link
+                # list) and post a single VIEW button, like the Drive
+                # search result, instead of flooding the chat.
+                tg_content = []
+                tmsg = ""
+                for index, (link, name) in enumerate(files.items(), start=1):
+                    tmsg += f"{index}. <a href='{link}'>{escape(name)}</a><br><br>"
+                    if len(tmsg.encode("utf-8")) > 39000:
+                        tg_content.append(tmsg)
+                        tmsg = ""
+                if tmsg:
+                    tg_content.append(tmsg)
+                button = await get_telegraph_list(tg_content)
+                await send_message(self.message, msg, button)
             else:
                 fmsg = ""
                 for index, (link, name) in enumerate(files.items(), start=1):
