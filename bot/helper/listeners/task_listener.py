@@ -365,6 +365,23 @@ class TaskListener(TaskConfig):
             msg += f"\n<b>cc: </b>{self.tag}\n\n"
             if not files:
                 await send_message(self.message, msg)
+            elif self.is_buzzheavier:
+                # Render each uploaded file as an inline button (bubble),
+                # the same UX as the Gdrive/Gofile cloud-link button,
+                # instead of numbered inline text links. Telegram caps a
+                # keyboard at 100 buttons, so chunk into separate
+                # messages when a folder upload exceeds that.
+                items = list(files.items())
+                for start in range(0, len(items), 90):
+                    buttons = ButtonMaker()
+                    for link, name in items[start : start + 90]:
+                        buttons.url_button(f"☁️ {name}", link)
+                    await send_message(
+                        self.message,
+                        msg if start == 0 else f"<b>cc: </b>{self.tag}",
+                        buttons.build_menu(1),
+                    )
+                    await sleep(1)
             else:
                 fmsg = ""
                 for index, (link, name) in enumerate(files.items(), start=1):
