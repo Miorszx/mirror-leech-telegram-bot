@@ -1,5 +1,7 @@
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath
+from aiofiles import open as aiopen
+from os import path as ospath
 from base64 import b64encode
 from os.path import basename as ospath_basename
 from re import match as re_match
@@ -32,6 +34,11 @@ from ..helper.mirror_leech_utils.download_utils.alldebrid_resolver import (
 )
 from ..helper.mirror_leech_utils.status_utils.alldebrid_status import (
     AllDebridMagnetStatus,
+)
+from ..helper.mirror_leech_utils.download_utils.torbox_resolver import (
+    torbox_resolve,
+    torbox_resolve_magnet,
+    torbox_resolve_torrent,
 )
 from ..helper.mirror_leech_utils.download_utils.direct_downloader import (
     add_direct_download,
@@ -108,6 +115,7 @@ class Mirror(TaskListener):
             "-bt": False,
             "-ut": False,
             "-ad": False,
+            "-tb": False,
             "-bh": False,
             "-i": 0,
             "-sp": 0,
@@ -156,7 +164,10 @@ class Mirror(TaskListener):
         self.bot_trans = args["-bt"]
         self.user_trans = args["-ut"]
         self.is_alldebrid = args["-ad"]
-        self.is_buzzheavier = args["-bh"]
+        self.is_torbox = args["-tb"]
+        # ``-bh`` is a shortcut for ``-up bh`` (upload to BuzzHeavier).
+        if args["-bh"] and not self.up_dest:
+            self.up_dest = "bh"
         self.ffmpeg_cmds = args["-ff"]
 
         headers = args["-h"]
@@ -321,10 +332,44 @@ class Mirror(TaskListener):
             await self.remove_from_same_dir()
             return
 
-        # AllDebrid magnet / torrent path takes precedence over the
-        # default aria2 / qbit / jd routing when ``-ad`` is set so the
-        # user does not have to fight with DEFAULT_UPLOAD or pick the
-        # right downloader manually.
+        if self.is_torbox:
+            try:
+                if is_magnet(self.link):
+                    resolved = await torbox_resolve_magnet(
+                        self.link,
+                        is_cancelled=lambda: self.is_cancelled,
+                    )
+                    self._torbox_torrent_id = resolved.get("torbox_torrent_id", 0)
+                    self.link = resolved
+
+                elif (
+                    isinstance(self.link, str)
+                    and self.link.endswith(".torrent")
+                    and await aiopath.exists(self.link)
+                ):
+                    async with aiopen(self.link, "rb") as f:
+                        torrent_bytes = await f.read()
+
+                    resolved = await torbox_resolve_torrent(
+                        torrent_bytes,
+                        ospath.basename(self.link),
+                        is_cancelled=lambda: self.is_cancelled,
+                    )
+                    self._torbox_torrent_id = resolved.get("torbox_torrent_id", 0)
+                    self.link = resolved
+
+            except DirectDownloadLinkException as e:
+                msg = str(e)
+                LOGGER.info(msg)
+                if msg.startswith("ERROR:"):
+                    await send_message(self.message, msg)
+                await self.remove_from_same_dir()
+                return
+            except Exception as e:
+                await send_message(self.message, e)
+                await self.remove_from_same_dir()
+                return
+
         if self.is_alldebrid and (
             is_magnet(self.link) or self.link.endswith(".torrent")
         ):
@@ -436,10 +481,8 @@ class Mirror(TaskListener):
             if isinstance(resolved, dict):
                 self._alldebrid_magnet_id = resolved.get("magnet_id", 0)
                 self.link = resolved
-                # Drop torrent-specific routing flags so the dispatcher
-                # picks ``add_direct_download``.
-                self.is_qbit = False
                 self.is_jd = False
+                self.is_qbit = False
                 # The status message we issued before polling is still
                 # the one in the chat. ``add_direct_download`` would
                 # otherwise call ``send_status_message`` again, which
@@ -449,10 +492,40 @@ class Mirror(TaskListener):
                 # that downloaders honour for RSS-triggered tasks)
                 # tells ``add_direct_download`` to keep the existing
                 # status row and just edit it in place via the
-                # periodic refresher. The flag has no other observable
-                # effect on this task: it only gates the redundant
-                # ``send_status_message`` calls in the download utils.
+                # periodic refresher.
                 self.is_rss = True
+
+        if (
+            self.is_torbox
+            and isinstance(self.link, str)
+            and not self.is_jd
+            and not self.is_nzb
+            and not self.is_qbit
+            and not is_magnet(self.link)
+            and not is_rclone_path(self.link)
+            and not is_gdrive_link(self.link)
+            and not self.link.endswith(".torrent")
+            and file_ is None
+            and not is_gdrive_id(self.link)
+        ):
+            try:
+                resolved = await torbox_resolve(
+                    self.link,
+                    is_cancelled=lambda: self.is_cancelled,
+                )
+                self._torbox_web_id = resolved.get("torbox_web_id", 0)
+                self.link = resolved
+            except DirectDownloadLinkException as e:
+                msg = str(e)
+                LOGGER.info(msg)
+                if msg.startswith("ERROR:"):
+                    await send_message(self.message, msg)
+                await self.remove_from_same_dir()
+                return
+            except Exception as e:
+                await send_message(self.message, e)
+                await self.remove_from_same_dir()
+                return
 
         if (
             isinstance(self.link, str)
@@ -473,7 +546,6 @@ class Mirror(TaskListener):
                         self.link = resolved
                         LOGGER.info(f"AllDebrid link: {self.link}")
                     else:
-                        # multi-file payload routed through add_direct_download
                         self.link = resolved
                 except DirectDownloadLinkException as e:
                     msg = str(e)
@@ -489,9 +561,13 @@ class Mirror(TaskListener):
 
             if isinstance(self.link, str):
                 content_type = await get_content_type(self.link)
-                if content_type is None or re_match(r"text/html|text/plain", content_type):
+                if content_type is None or re_match(
+                    r"text/html|text/plain", content_type
+                ):
                     try:
-                        self.link = await sync_to_async(direct_link_generator, self.link)
+                        self.link = await sync_to_async(
+                            direct_link_generator, self.link
+                        )
                         if isinstance(self.link, tuple):
                             self.link, headers = self.link
                         elif isinstance(self.link, str):

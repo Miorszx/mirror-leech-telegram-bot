@@ -1,101 +1,64 @@
-"""BuzzHeavier upload helper.
-
-Used by mirror tasks when the ``-bh`` flag is supplied. Walks the
-download directory, streams each file to BuzzHeavier with progress
-callbacks that the existing status renderer can read, and finishes by
-calling ``listener.on_upload_complete``.
-"""
-
-from __future__ import annotations
-
-import asyncio
-from html import escape
 from logging import getLogger
-from os import walk, path as ospath
 from time import time
-from typing import AsyncIterator
-
+from os import path as ospath, walk
+from asyncio import CancelledError, sleep as asleep
+from aiofiles.os import path as aiopath
 from aiofiles import open as aiopen
 from httpx import AsyncClient, HTTPError, Limits, Timeout
 
+from ..ext_utils.bot_utils import sync_to_async
 from ...core.config_manager import Config
-from ..ext_utils.telegraph_helper import telegraph
-
 
 LOGGER = getLogger(__name__)
 
 _UPLOAD_BASE = "https://w.buzzheavier.com"
-_UPLOAD_CHUNK = 16 * 1024 * 1024  # 16 MiB read window
+_UPLOAD_CHUNK = 16 * 1024 * 1024
 _HTTP_TIMEOUT = Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)
+# BuzzHeavier edges occasionally answer a brief 5xx/429 during restarts;
+# retry instead of failing the whole task.
 _RETRY_STATUS = {429, 500, 502, 503, 504, 520, 522, 524}
 _MAX_UPLOAD_RETRIES = 4
 
-
-def _auth_headers() -> dict[str, str]:
-    headers: dict[str, str] = {}
+def _auth_headers():
+    headers = {}
     account_id = (Config.BUZZHEAVIER_ACCOUNT_ID or "").strip()
     if account_id:
         headers["Authorization"] = f"Bearer {account_id}"
     return headers
 
-
 class BuzzHeavierUploader:
-    """Stream files in ``self._path`` to BuzzHeavier sequentially."""
 
-    def __init__(self, listener, path: str):
+    def __init__(self, listener, path):
         self._listener = listener
         self._path = path
         self._processed_bytes = 0
         self._start_time = time()
-        self._last_speed_bytes = 0
-        self._last_speed_at = self._start_time
-        self._speed = 0.0
-        self._files_dict: dict[str, str] = {}
-        self._total_files = 0
-        self._error: str = ""
-
-    # ── status interface ─────────────────────────────────────────────
 
     @property
-    def processed_bytes(self) -> int:
+    def processed_bytes(self):
         return self._processed_bytes
 
     @property
-    def speed(self) -> float:
-        now = time()
-        elapsed = now - self._last_speed_at
-        if elapsed >= 1.0:
-            delta = self._processed_bytes - self._last_speed_bytes
-            self._speed = delta / elapsed if elapsed > 0 else 0.0
-            self._last_speed_at = now
-            self._last_speed_bytes = self._processed_bytes
-        return self._speed
+    def speed(self):
+        try:
+            return self._processed_bytes / (time() - self._start_time)
+        except:
+            return 0
 
-    # ── upload ────────────────────────────────────────────────────────
-
-    async def _stream_file(self, file_path: str, file_size: int) -> AsyncIterator[bytes]:
+    async def _stream_file(self, file_path):
         async with aiopen(file_path, "rb") as fh:
             while True:
                 if self._listener.is_cancelled:
-                    return
+                    raise CancelledError()
                 chunk = await fh.read(_UPLOAD_CHUNK)
                 if not chunk:
                     return
                 self._processed_bytes += len(chunk)
                 yield chunk
 
-    async def _upload_one(self, client: AsyncClient, file_path: str) -> str:
-        """PUT a single file with retry on 5xx / 429 / network errors.
-
-        BuzzHeavier occasionally answers a brief 503 ("Service
-        Unavailable") during edge restarts; the previous one-shot
-        attempt failed the whole task instead of waiting it out. We
-        now retry up to ``_MAX_UPLOAD_RETRIES`` times with
-        capped exponential backoff, resetting the on-disk read each
-        attempt so the progress bar stays consistent.
-        """
+    async def _upload_one(self, client, file_path):
         file_name = ospath.basename(file_path)
-        file_size = ospath.getsize(file_path)
+        file_size = await aiopath.getsize(file_path)
         url = f"{_UPLOAD_BASE}/{file_name}"
         headers = {
             "Content-Type": "application/octet-stream",
@@ -103,22 +66,22 @@ class BuzzHeavierUploader:
             **_auth_headers(),
         }
 
-        LOGGER.info(f"Uploading to BuzzHeavier: {file_name} ({file_size} bytes)")
+        LOGGER.info(f"Uploading to BuzzHeavier: {file_path}")
 
-        last_error: str = ""
+        last_error = ""
         sent_before_attempt = self._processed_bytes
         response = None
 
         for attempt in range(1, _MAX_UPLOAD_RETRIES + 1):
             if self._listener.is_cancelled:
-                raise RuntimeError("Cancelled before BuzzHeavier upload finished")
+                raise CancelledError()
             # Each retry restarts the stream from byte 0, so reset the
-            # progress counter so the bar does not double-count.
+            # progress counter to avoid double-counting on the bar.
             self._processed_bytes = sent_before_attempt
             try:
                 response = await client.put(
                     url,
-                    content=self._stream_file(file_path, file_size),
+                    content=self._stream_file(file_path),
                     headers=headers,
                 )
             except HTTPError as exc:
@@ -132,23 +95,20 @@ class BuzzHeavierUploader:
                     f"BuzzHeavier {file_name} attempt {attempt} hit network error "
                     f"({exc}); retrying in {wait}s"
                 )
-                await asyncio.sleep(wait)
+                await asleep(wait)
                 continue
 
             if response.status_code in (200, 201):
                 break
 
             last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-            if (
-                response.status_code in _RETRY_STATUS
-                and attempt < _MAX_UPLOAD_RETRIES
-            ):
+            if response.status_code in _RETRY_STATUS and attempt < _MAX_UPLOAD_RETRIES:
                 wait = min(30, 2 ** attempt)
                 LOGGER.warning(
                     f"BuzzHeavier {file_name} attempt {attempt} -> "
                     f"{response.status_code}; retrying in {wait}s"
                 )
-                await asyncio.sleep(wait)
+                await asleep(wait)
                 continue
 
             raise RuntimeError(
@@ -156,8 +116,6 @@ class BuzzHeavierUploader:
                 f"{response.text[:200]}"
             )
         else:
-            # Loop exhausted without ``break`` -- every attempt was a
-            # retryable status that we ran out of patience for.
             raise RuntimeError(
                 f"BuzzHeavier upload failed after {_MAX_UPLOAD_RETRIES} attempts: "
                 f"{last_error or 'unknown error'}"
@@ -173,132 +131,76 @@ class BuzzHeavierUploader:
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, dict):
             raise RuntimeError("BuzzHeavier response missing 'data' object")
-        file_id = (data.get("id") or "").strip()
-        if not file_id:
-            raise RuntimeError("BuzzHeavier response missing file id")
-        return f"https://buzzheavier.com/{file_id}"
-
-    async def upload(self) -> None:
-        files: list[tuple[str, str]] = []
-        # ``rel_name`` keeps the directory structure relative to the
-        # download root so the final Telegraph index can disambiguate
-        # files that share a basename (e.g. ``Season 01/E01.mkv`` vs
-        # ``Season 02/E01.mkv``).
-        if ospath.isfile(self._path):
-            files.append((self._path, ospath.basename(self._path)))
+        if file_id := (data.get("id") or "").strip():
+            return f"https://buzzheavier.com/{file_id}"
         else:
-            base = self._path.rstrip("/")
-            for root, _, names in walk(self._path):
+            raise RuntimeError("BuzzHeavier response missing file id")
+
+    async def upload(self):
+        files = []
+        corrupted = 0
+        error = ""
+        files_dict = {}
+        if await aiopath.isfile(self._path):
+            files.append(self._path)
+        else:
+            walk_data = await sync_to_async(lambda: list(walk(self._path)))
+            for root, _, names in walk_data:
                 for name in sorted(names):
                     candidate = ospath.join(root, name)
-                    if not ospath.isfile(candidate):
-                        continue
-                    rel = ospath.relpath(candidate, base)
-                    files.append((candidate, rel))
-
+                    if await aiopath.isfile(candidate):
+                        files.append(candidate)
         if not files:
             await self._listener.on_upload_error(
                 "BuzzHeavier: no files were found to upload"
             )
             return
-
-        self._total_files = len(files)
-        first_link = ""
-
+        total_files = len(files)
         try:
             async with AsyncClient(
                 timeout=_HTTP_TIMEOUT,
                 limits=Limits(max_connections=4, max_keepalive_connections=2),
             ) as client:
-                for file_path, rel_name in files:
-                    if self._listener.is_cancelled:
-                        await self._listener.on_upload_error(
-                            "BuzzHeavier upload cancelled by user"
-                        )
-                        return
+                for file_path in files:
                     try:
                         link = await self._upload_one(client, file_path)
                     except (HTTPError, RuntimeError) as exc:
                         LOGGER.error(
-                            f"BuzzHeavier upload error for {rel_name}: {exc}"
+                            f"BuzzHeavier Upload Error: {exc} - File Path: {file_path}"
                         )
-                        self._error = str(exc)
-                        await self._listener.on_upload_error(
-                            f"BuzzHeavier: {exc}"
-                        )
+                        error = str(exc)
+                        corrupted += 1
+                        continue
+                    except CancelledError:
                         return
-                    self._files_dict[link] = rel_name
-                    if not first_link:
-                        first_link = link
-        except Exception as exc:  # pragma: no cover - safety net
+                    if self._listener.is_cancelled:
+                        return
+                    if self._listener.files_links:
+                        files_dict[link] = ospath.basename(file_path)
+        except Exception as exc:
             LOGGER.error(f"BuzzHeavier session error: {exc}")
             await self._listener.on_upload_error(f"BuzzHeavier: {exc}")
             return
 
-        if self._listener.is_cancelled:
+        if total_files <= corrupted:
             await self._listener.on_upload_error(
-                "BuzzHeavier upload cancelled by user"
+                f"Files Corrupted or unable to upload. {error or 'Check logs!'}"
             )
             return
 
+        if self._listener.is_cancelled:
+            return
         LOGGER.info(
-            f"BuzzHeavier upload completed: {self._total_files} file(s)"
+            f"Uploaded To BuzzHeavier: {self._listener.name} - {total_files - corrupted} files"
         )
-
-        # Mirror branch in ``TaskListener.on_upload_complete`` only
-        # renders a single ``link`` button -- the ``files`` dict is
-        # ignored unless ``self.is_leech``. For multi-file BuzzHeavier
-        # uploads we therefore publish a Telegraph index page that
-        # lists every file, then hand its URL to the listener so the
-        # final "Cloud Link" button opens that index instead of the
-        # first BuzzHeavier link.
-        primary_link = first_link
-        if self._total_files > 1:
-            telegraph_url = await self._build_telegraph_index()
-            if telegraph_url:
-                primary_link = telegraph_url
-
         await self._listener.on_upload_complete(
-            primary_link,
-            self._files_dict,
-            self._total_files,
-            "BuzzHeavier",
+            None,
+            files_dict,
+            total_files,
+            corrupted,
         )
 
-    # ── multi-file rendering helpers ────────────────────────────────
-
-    async def _build_telegraph_index(self) -> str:
-        """Create a Telegraph page that indexes every BuzzHeavier link.
-
-        Returns the public URL on success, or an empty string when
-        Telegraph is unreachable / fails -- the caller falls back to
-        the first BuzzHeavier link in that case.
-        """
-        if not self._files_dict:
-            return ""
-
-        rows: list[str] = []
-        for link, name in self._files_dict.items():
-            rows.append(
-                f"<li><a href='{link}'>{escape(name)}</a></li>"
-            )
-
-        title = self._listener.name or "BuzzHeavier upload"
-        # Truncate Telegraph titles to their 256 char ceiling.
-        title = title[:256]
-        body = (
-            f"<h3>{escape(title)}</h3>"
-            f"<p>{len(self._files_dict)} file(s) uploaded to BuzzHeavier.</p>"
-            f"<ol>{''.join(rows)}</ol>"
-        )
-
-        try:
-            page = await telegraph.create_page(title, body)
-        except Exception as exc:
-            LOGGER.warning(f"BuzzHeavier Telegraph index failed: {exc}")
-            return ""
-
-        path = page.get("path") if isinstance(page, dict) else None
-        if not path:
-            return ""
-        return f"https://graph.org/{path}"
+    async def cancel_task(self):
+        self._listener.is_cancelled = True
+        LOGGER.info(f"Cancelling Upload: {self._listener.name}")
+        await self._listener.on_upload_error("your upload has been stopped!")
