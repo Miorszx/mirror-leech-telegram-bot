@@ -365,10 +365,11 @@ class TaskListener(TaskConfig):
             msg += f"\n<b>cc: </b>{self.tag}\n\n"
             if not files:
                 await send_message(self.message, msg)
-            elif self.is_buzzheavier and len(files) > 20:
-                # Many files: publish a Telegraph page (numbered link
-                # list) and post a single VIEW button, like the Drive
-                # search result, instead of flooding the chat.
+            elif self.is_buzzheavier and len(files) > 1:
+                # More than one file: publish a Telegraph page
+                # (numbered link list) and post a single VIEW button,
+                # like the Drive search result, instead of flooding
+                # the chat. A single file stays as an inline link.
                 tg_content = []
                 tmsg = ""
                 for index, (link, name) in enumerate(files.items(), start=1):
