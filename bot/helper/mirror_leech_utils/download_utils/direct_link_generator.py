@@ -255,11 +255,15 @@ def buzzheavier(url):
     @return: Direct download link
     """
     pattern = r"^https?://buzzheavier\.com/[a-zA-Z0-9]+$"
-    if not match(pattern, url):
+    ts_pattern = r"^https?://ts\\.buzzheavier\\.com/d/[a-zA-Z0-9]+(?:\\?.*)?$"
+    if not (match(pattern, url) or match(ts_pattern, url)):
+        return url
+    # ts.buzzheavier.com/d/{id}?v=... direct token link - pass through to downloader
+    if "ts.buzzheavier.com" in url:
         return url
 
     def _bhscraper(url, folder=False):
-        session = Session()
+        session = create_scraper()
         if "/download" not in url:
             url += "/download"
         url = url.strip()
@@ -282,7 +286,7 @@ def buzzheavier(url):
         except Exception as e:
             raise DirectDownloadLinkException(f"ERROR: {str(e)}") from e
 
-    with Session() as session:
+    with create_scraper() as session:
         tree = HTML(session.get(url).text)
         if link := tree.xpath(
             "//a[contains(@class, 'link-button') and contains(@class, 'gay-button')]/@hx-get"
