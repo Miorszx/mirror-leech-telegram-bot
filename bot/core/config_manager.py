@@ -17,6 +17,7 @@ class Config:
     BUZZHEAVIER_FOLDER_ID = ""
     BUZZHEAVIER_ANON_FOLDER = False  # allow anonymous folder uploads (flattened) instead of erroring
     GOFILE_API_KEY = ""
+    TLDV_TOKEN = ""
     CMD_SUFFIX = ""
     CLONE_DUMP_CHATS = ""
     DATABASE_URL = ""
