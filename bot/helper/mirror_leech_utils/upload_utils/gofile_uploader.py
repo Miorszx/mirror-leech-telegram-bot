@@ -145,6 +145,8 @@ class GoFileUploader:
             )
             return
         total_files = len(files)
+        first_link = ""
+        files_dict = {}
         try:
             async with AsyncClient(
                 timeout=_HTTP_TIMEOUT,
@@ -166,6 +168,7 @@ class GoFileUploader:
                     if self._listener.is_cancelled:
                         return
                     first_link = first_link or link
+                    files_dict[link] = ospath.basename(file_path)
         except Exception as exc:
             LOGGER.error(f"GoFile session error: {exc}")
             await self._listener.on_upload_error(f"GoFile: {exc}")
