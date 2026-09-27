@@ -27,6 +27,7 @@ from ..helper.mirror_leech_utils.download_utils.aria2_download import (
     add_aria2_download,
 )
 from ..helper.mirror_leech_utils.download_utils.alldebrid_resolver import (
+    fetch_url_bytes,
     alldebrid_resolve,
     alldebrid_resolve_magnet,
     alldebrid_resolve_torrent,
@@ -382,8 +383,11 @@ class Mirror(TaskListener):
                     )
                 else:
                     LOGGER.info(f"AllDebrid torrent file route: {self.link}")
-                    async with aiopen(self.link, "rb") as fh:
-                        torrent_bytes = await fh.read()
+                    if isinstance(self.link, str) and await aiopath.exists(self.link):
+                        async with aiopen(self.link, "rb") as fh:
+                            torrent_bytes = await fh.read()
+                    else:
+                        torrent_bytes = await fetch_url_bytes(self.link)
                     resolved = await alldebrid_resolve_torrent(
                         torrent_bytes,
                         ospath.basename(self.link),

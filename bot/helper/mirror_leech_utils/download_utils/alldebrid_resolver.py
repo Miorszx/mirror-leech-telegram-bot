@@ -206,10 +206,31 @@ def _ensure_api_key() -> str:
         )
 
 
-def _basename_from_url(link: str) -> str:
+def basename_from_url(link: str) -> str:
     parsed = urlparse(link)
     name = parsed.path.rstrip("/").rsplit("/", 1)[-1]
     return name or "file"
+
+
+async def fetch_url_bytes(url: str) -> bytes:
+    """Download a small remote file (e.g. a ``.torrent``) into memory.
+
+    ``aiofiles.open`` only handles local paths, so a ``.torrent`` served over
+    HTTP (e.g. ``https://<tracker>/download/<id>.torrent``) must be fetched
+    with an HTTP client first.
+    """
+    headers = {"User-Agent": _USER_AGENT}
+    try:
+        async with AsyncClient(
+            timeout=_TIMEOUT, headers=headers, follow_redirects=True
+        ) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.content
+    except HTTPError as exc:
+        raise DirectDownloadLinkException(
+            f"ERROR: Cannot download the torrent file (network/timeout problem): {exc}"
+        ) from exc
 
 
 # ── filehost link unlock ──────────────────────────────────────────────
@@ -233,7 +254,7 @@ async def alldebrid_resolve(link: str) -> str | dict[str, Any]:
     data = await _call_api("GET", f"{_API_BASE_V4}/link/unlock", params=params)
 
     direct = data.get("link")
-    filename = data.get("filename") or _basename_from_url(link)
+    filename = data.get("filename") or basename_from_url(link)
     filesize = int(data.get("filesize") or 0)
     streams = data.get("streams") or []
 
@@ -610,7 +631,7 @@ async def alldebrid_resolve_magnet(
     if not magnet_id:
         raise DirectDownloadLinkException("ERROR: AllDebrid did not return a magnet id")
 
-    name = entry.get("name") or _basename_from_url(magnet) or "torrent"
+    name = entry.get("name") or basename_from_url(magnet) or "torrent"
 
     try:
         no_seed_since = 0.0
