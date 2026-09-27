@@ -67,30 +67,36 @@ _MAGNET_STATUS_LABELS = {
 }
 _MAGNET_ERROR_CODES = {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 
-# Map a subset of AllDebrid error codes to user-friendly messages.
+# Map AllDebrid error codes to clear, user-facing messages so a failed task
+# tells the user WHAT is wrong (missing/invalid API key vs. a dead link vs.
+# the AllDebrid site itself being down) instead of a raw API code.
 _FRIENDLY_ERRORS = {
-    "AUTH_BAD_APIKEY": "ALLDEBRID_API_KEY is invalid",
-    "AUTH_BLOCKED": "AllDebrid account is blocked",
-    "AUTH_USER_BANNED": "AllDebrid account is banned",
-    "LINK_HOST_NOT_SUPPORTED": "host is not supported by AllDebrid",
-    "LINK_HOST_LIMIT_REACHED": "AllDebrid daily limit reached for this host",
-    "LINK_HOST_UNAVAILABLE": "host is temporarily unavailable on AllDebrid",
-    "LINK_DOWN": "the file is no longer available",
-    "LINK_PASS_PROTECTED": "password-protected links are not supported",
-    "LINK_TEMPORARY_UNAVAILABLE": "the link is temporarily unavailable",
+    "AUTH_MISSING_APIKEY": "API key is missing - add ALLDEBRID_API_KEY in the bot config",
+    "AUTH_BAD_APIKEY": "API key is invalid - check ALLDEBRID_API_KEY",
+    "AUTH_BLOCKED": "the AllDebrid account is blocked",
+    "AUTH_USER_BANNED": "the AllDebrid account is banned",
+    "LINK_HOST_NOT_SUPPORTED": "this website/host is not supported by AllDebrid",
+    "LINK_HOST_LIMIT_REACHED": "AllDebrid daily limit for this host is used up",
+    "LINK_HOST_UNAVAILABLE": "this host is down on AllDebrid right now",
+    "LINK_DOWN": "the file/link is dead (no longer available)",
+    "LINK_PASS_PROTECTED": "the link is password-protected - cannot unlock",
+    "LINK_TEMPORARY_UNAVAILABLE": "the link is temporarily unavailable - try again",
     "LINK_NOT_SUPPORTED": "this link is not supported by AllDebrid",
+    "LINK_TOO_MANY_DOWNLOADS": "this link has too many downloads",
     "MAGNET_INVALID_URI": "the magnet URI is malformed",
     "MAGNET_INVALID_FILE": "the .torrent file is invalid",
     "MAGNET_TOO_MANY_ACTIVE": "too many active magnets on AllDebrid",
+    "NO_SERVER": "the AllDebrid server is unavailable - try again shortly",
+    "INFRA_ERROR": "the AllDebrid service is having a technical problem - try again shortly",
 }
 
 
 def _api_error_message(error: dict[str, Any], link: str) -> str:
     code = (error.get("code") or "UNKNOWN").strip()
-    message = error.get("message") or "Unknown AllDebrid error"
-    friendly = _FRIENDLY_ERRORS.get(code, message)
+    message = error.get("message") or ""
+    friendly = _FRIENDLY_ERRORS.get(code) or message or "unknown website error (site problem)"
     if link:
-        return f"AllDebrid: {friendly} ({code}) for {link}"
+        return f"AllDebrid: {friendly} ({code}) | link: {link}"
     return f"AllDebrid: {friendly} ({code})"
 
 
@@ -120,16 +126,16 @@ async def _call_api(
             payload = response.json()
     except HTTPError as exc:
         raise DirectDownloadLinkException(
-            f"ERROR: AllDebrid network error: {exc}"
+            f"ERROR: Cannot reach the AllDebrid website (network/timeout problem): {exc}"
         ) from exc
     except ValueError as exc:
         raise DirectDownloadLinkException(
-            f"ERROR: AllDebrid returned malformed JSON: {exc}"
+            f"ERROR: AllDebrid website returned an invalid response (site problem): {exc}"
         ) from exc
 
     if not isinstance(payload, dict):
         raise DirectDownloadLinkException(
-            "ERROR: AllDebrid returned an unexpected payload shape"
+            "ERROR: AllDebrid website returned an unexpected response (site problem)"
         )
 
     if payload.get("status") != "success":
@@ -141,7 +147,7 @@ async def _call_api(
     inner = payload.get("data")
     if not isinstance(inner, dict):
         raise DirectDownloadLinkException(
-            "ERROR: AllDebrid response missing 'data' object"
+            "ERROR: AllDebrid website response is missing data (site problem)"
         )
     return inner
 
@@ -150,7 +156,9 @@ def _ensure_api_key() -> str:
     if api_key := (Config.ALLDEBRID_API_KEY or "").strip():
         return api_key
     else:
-        raise DirectDownloadLinkException("ERROR: ALLDEBRID_API_KEY is not configured")
+        raise DirectDownloadLinkException(
+            "ERROR: AllDebrid API key is missing - add ALLDEBRID_API_KEY in the bot config"
+        )
 
 
 def _basename_from_url(link: str) -> str:
@@ -211,7 +219,7 @@ async def alldebrid_resolve(link: str) -> str | dict[str, Any]:
             }
 
     raise DirectDownloadLinkException(
-        f"ERROR: AllDebrid did not return a usable download link for {link}"
+        f"ERROR: AllDebrid could not find a download link for this URL - the link may be dead or the host unsupported | link: {link}"
     )
 
 
@@ -594,14 +602,14 @@ async def alldebrid_resolve_magnet(
                     no_seed_since = now
                 elif now - no_seed_since >= no_seed_timeout:
                     raise DirectDownloadLinkException(
-                        f"ERROR: AllDebrid no-seed timeout after {int(no_seed_timeout)}s"
+                        f"ERROR: AllDebrid torrent has no seeders (dead torrent) - gave up after {int(no_seed_timeout)}s"
                     )
             else:
                 no_seed_since = 0.0
 
             if now - start_time >= max_duration:
                 raise DirectDownloadLinkException(
-                    f"ERROR: AllDebrid magnet exceeded {int(max_duration)}s"
+                    f"ERROR: AllDebrid torrent took too long / timed out after {int(max_duration)}s"
                 )
 
             await asyncio.sleep(poll_interval)
@@ -609,7 +617,7 @@ async def alldebrid_resolve_magnet(
         raw_files = await get_magnet_files(magnet_id)
         if not raw_files:
             raise DirectDownloadLinkException(
-                "ERROR: AllDebrid returned no files for the magnet"
+                "ERROR: AllDebrid returned no files for the magnet (torrent may be dead or still empty)"
             )
 
         resolved = await _resolve_unlocked_files(
@@ -698,14 +706,14 @@ async def alldebrid_resolve_torrent(
                     no_seed_since = now
                 elif now - no_seed_since >= no_seed_timeout:
                     raise DirectDownloadLinkException(
-                        f"ERROR: AllDebrid no-seed timeout after {int(no_seed_timeout)}s"
+                        f"ERROR: AllDebrid torrent has no seeders (dead torrent) - gave up after {int(no_seed_timeout)}s"
                     )
             else:
                 no_seed_since = 0.0
 
             if now - start_time >= max_duration:
                 raise DirectDownloadLinkException(
-                    f"ERROR: AllDebrid magnet exceeded {int(max_duration)}s"
+                    f"ERROR: AllDebrid torrent took too long / timed out after {int(max_duration)}s"
                 )
 
             await asyncio.sleep(poll_interval)
@@ -713,7 +721,7 @@ async def alldebrid_resolve_torrent(
         raw_files = await get_magnet_files(magnet_id)
         if not raw_files:
             raise DirectDownloadLinkException(
-                "ERROR: AllDebrid returned no files for the torrent"
+                "ERROR: AllDebrid returned no files for the torrent (torrent may be dead or still empty)"
             )
         resolved = await _resolve_unlocked_files(
             raw_files, progress_callback=progress_callback
