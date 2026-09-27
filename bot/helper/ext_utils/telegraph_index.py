@@ -46,9 +46,18 @@ CATEGORY_LABEL = {
 }
 
 # Season + Episode:  S01E01  S1E01  1x01  01x01
-_RE_SE = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})|(\d{1,2})x(\d{1,2})")
+# Digit guards are essential: without them the ``1x01`` alternative happily
+# matches the ``40x10`` inside a resolution string like ``1440x1080``,
+# collapsing an entire season into Season 40 / E10.
+_RE_SE = re.compile(
+    r"(?<!\d)[Ss](\d{1,2})[Ee](\d{1,3})(?!\d)|(?<!\d)(\d{1,2})x(\d{1,3})(?!\d)"
+)
 # Episode only:  E01  Ep01  Episode.01  (not preceded by another digit)
 _RE_EP = re.compile(r"(?<!\d)(?:[Ee][Pp]?|[Ee]pisode[\s._-]?)(\d{1,3})(?!\d)", re.IGNORECASE)
+# Bare numbering used by many BD releases:  " - 001", " - 142 END", " - 07 v2".
+# Requires spaced hyphens on both sides and 2-3 digits, so resolution strings
+# (1440x1080), codecs (x265-10Bit) and years never match.
+_RE_EP_BARE = re.compile(r"\s-\s(\d{2,3})(?!\d)")
 
 
 def _ext(filename: str) -> str:
@@ -81,6 +90,9 @@ def _detect_episode(filename: str) -> Optional[Tuple[Optional[int], int]]:
             return (int(m.group(1)), int(m.group(2)))
         return (int(m.group(3)), int(m.group(4)))
     m = _RE_EP.search(filename)
+    if m:
+        return (None, int(m.group(1)))
+    m = _RE_EP_BARE.search(filename)
     if m:
         return (None, int(m.group(1)))
     return None
