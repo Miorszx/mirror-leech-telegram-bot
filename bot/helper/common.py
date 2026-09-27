@@ -279,11 +279,29 @@ class TaskConfig:
         default_upload = (
             self.user_dict.get("DEFAULT_UPLOAD", "") or Config.DEFAULT_UPLOAD
         )
-        if (
-            default_upload == "bh"
-            or self.up_dest == "bh"
-            or self.up_dest.startswith(("bh:", "mt:bh:"))
-        ):
+        # An explicit `-up` destination must override the configured default.
+        # With a `bh` default, `-up gd` / `-up gf` / rclone paths were otherwise
+        # swallowed by the BuzzHeavier branch and never reached their backend.
+        # NOTE: `mt:` is ambiguous (both GDrive ids and rclone paths may use it),
+        # so the GDrive check must come before the rclone check.
+        _explicit = self.up_dest if isinstance(self.up_dest, str) else ""
+        _is_bh_dest = _explicit in ("bh", "mt:bh") or _explicit.startswith(
+            ("bh:", "mt:bh:")
+        )
+        if _explicit:
+            if _is_bh_dest:
+                default_upload = "bh"
+            elif _explicit == "gf":
+                default_upload = "gf"
+            elif (
+                _explicit == "gd"
+                or _explicit.startswith(("tp:", "sa:"))
+                or is_gdrive_id(_explicit)
+            ):
+                default_upload = "gd"
+            elif _explicit == "rc" or is_rclone_path(_explicit):
+                default_upload = "rc"
+        if default_upload == "bh" or _is_bh_dest:
             if not self.up_dest and default_upload == "bh":
                 self.up_dest = (
                     self.user_dict.get("BUZZHEAVIER_FOLDER_ID")
