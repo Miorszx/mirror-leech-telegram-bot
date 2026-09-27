@@ -93,6 +93,19 @@ def arg_parser(items, arg_base):
     if not items:
         return
 
+    # Normalize the inline `-z:password` form to `-z password` so both spellings
+    # work identically (`-z mypassword` and `-z:mypassword`). Kept as a local copy
+    # so the caller's list is never mutated.
+    _normalized = []
+    for _it in items:
+        if _it.startswith("-z:") and _it != "-z":
+            _normalized.append("-z")
+            if _it[3:]:
+                _normalized.append(_it[3:])
+        else:
+            _normalized.append(_it)
+    items = _normalized
+
     arg_start = -1
     i = 0
     total = len(items)
