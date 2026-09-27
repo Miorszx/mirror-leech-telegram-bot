@@ -171,7 +171,7 @@ class BuzzHeavierUploader:
 
         return f"https://buzzheavier.com/{file_id}"
 
-    async def _upload_dir(self, directory, parent_id):
+    async def _upload_dir(self, directory, parent_id, anon=False):
         entries = await sync_to_async(lambda: list(walk(directory)))
 
         for root, _, files in entries:
@@ -180,16 +180,23 @@ class BuzzHeavierUploader:
                 return
 
             if root != directory:
-                folder_name = ospath.basename(root)
-                parent_id = await self._create_directory(folder_name, parent_id)
-                self._folders += 1
+                if anon:
+                    # No remote folders in anon mode; still count the local
+                    # subdirectory so the completion message is accurate.
+                    self._folders += 1
+                else:
+                    folder_name = ospath.basename(root)
+                    parent_id = await self._create_directory(folder_name, parent_id)
+                    self._folders += 1
 
             for file in sorted(files):
                 path = ospath.join(root, file)
 
                 if await aiopath.isfile(path):
                     try:
-                        await self._upload_file(path, parent_id)
+                        # Anonymous uploads have no parent id (public endpoint
+                        # has no folder API), so files are flattened to root.
+                        await self._upload_file(path, "" if anon else parent_id)
                     except Exception as e:
                         LOGGER.error(f"Upload error: {e}")
                         continue
@@ -213,23 +220,24 @@ class BuzzHeavierUploader:
 
             else:
                 if not self._account_id:
-                    # Anonymous uploads go to the public endpoint which does not
-                    # support nested folder structures. Only single-file anon
-                    # uploads are allowed; use mt:bh (your own account) for folders.
-                    raise ValueError(
-                        "Anonymous Buzzheavier uploads support files only. "
-                        "Use `-up mt:bh` (your account) to upload folders."
+                    # Anonymous uploads have no folder support on BuzzHeavier's
+                    # public API, so flatten every file to the root endpoint and
+                    # let the Telegraph File Index (built in task_listener when
+                    # >=2 files) aggregate them. Single file still gets a link.
+                    mime_type = "Folder"
+                    await self._upload_dir(self._path, "", anon=True)
+                    link = self._file_links[0][1] if self._file_links else ""
+                else:
+                    mime_type = "Folder"
+                    root_name = ospath.basename(ospath.abspath(self._path))
+
+                    root_id = await self._create_directory(
+                        root_name, self._listener.up_dest
                     )
-                mime_type = "Folder"
-                root_name = ospath.basename(ospath.abspath(self._path))
 
-                root_id = await self._create_directory(
-                    root_name, self._listener.up_dest
-                )
+                    await self._upload_dir(self._path, root_id)
 
-                await self._upload_dir(self._path, root_id)
-
-                link = f"https://buzzheavier.com/{root_id}"
+                    link = f"https://buzzheavier.com/{root_id}"
 
             if self._listener.is_cancelled:
                 return
