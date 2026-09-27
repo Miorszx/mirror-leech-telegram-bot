@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import re
 import urllib.parse
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
@@ -68,26 +69,68 @@ _MAGNET_STATUS_LABELS = {
 _MAGNET_ERROR_CODES = {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 
 # Map AllDebrid error codes to clear, user-facing messages so a failed task
-# tells the user WHAT is wrong (missing/invalid API key vs. a dead link vs.
+# tells the user WHAT is wrong (missing/invalid/expired key vs. a dead link vs.
 # the AllDebrid site itself being down) instead of a raw API code.
+# Full code list: https://docs.alldebrid.com (Error codes section).
 _FRIENDLY_ERRORS = {
+    # ── auth / account ──
     "AUTH_MISSING_APIKEY": "API key is missing - add ALLDEBRID_API_KEY in the bot config",
-    "AUTH_BAD_APIKEY": "API key is invalid - check ALLDEBRID_API_KEY",
-    "AUTH_BLOCKED": "the AllDebrid account is blocked",
+    "AUTH_BAD_APIKEY": "API key is invalid - check/replace ALLDEBRID_API_KEY (generate a new one at https://alldebrid.com/apikeys)",
+    "AUTH_BLOCKED": "the API key is geo-blocked or the IP is blocked - check your AllDebrid account settings",
     "AUTH_USER_BANNED": "the AllDebrid account is banned",
+    "ACCOUNT_INVALID": "the AllDebrid account is invalid or no longer active - renew your subscription",
+    "MUST_BE_PREMIUM": "your AllDebrid subscription has EXPIRED or is not premium - RENEW it (https://alldebrid.com/premium) or replace ALLDEBRID_API_KEY",
+    "MAGNET_MUST_BE_PREMIUM": "your AllDebrid subscription has EXPIRED or is not premium - RENEW it (https://alldebrid.com/premium) or replace ALLDEBRID_API_KEY",
+    "FREE_TRIAL_LIMIT_REACHED": "the AllDebrid free trial limit has been reached (7 days / 25 GB) - upgrade to premium",
+    "INSUFFICIENT_BALANCE": "the AllDebrid account has insufficient balance",
+    # ── link / filehost ──
+    "LINK_IS_MISSING": "no link was sent",
+    "USER_LINK_MISSING": "no link was sent",
+    "USER_LINK_INVALID": "the link is invalid",
+    "BAD_LINK": "the link is invalid or malformed",
     "LINK_HOST_NOT_SUPPORTED": "this website/host is not supported by AllDebrid",
+    "LINK_NOT_SUPPORTED": "this link is not supported by AllDebrid",
     "LINK_HOST_LIMIT_REACHED": "AllDebrid daily limit for this host is used up",
     "LINK_HOST_UNAVAILABLE": "this host is down on AllDebrid right now",
+    "LINK_HOST_FULL": "AllDebrid servers for this host are busy - try again later",
     "LINK_DOWN": "the file/link is dead (no longer available)",
     "LINK_PASS_PROTECTED": "the link is password-protected - cannot unlock",
     "LINK_TEMPORARY_UNAVAILABLE": "the link is temporarily unavailable - try again",
-    "LINK_NOT_SUPPORTED": "this link is not supported by AllDebrid",
-    "LINK_TOO_MANY_DOWNLOADS": "this link has too many downloads",
+    "LINK_TOO_MANY_DOWNLOADS": "this link has too many downloads right now",
+    "LINK_ERROR": "AllDebrid cannot convert this link",
+    "DOWNLOAD_FAILED": "AllDebrid failed to download this file",
+    "REDIRECTOR_NOT_SUPPORTED": "this redirector link is not supported by AllDebrid",
+    "REDIRECTOR_ERROR": "AllDebrid could not follow this redirector link",
+    # ── magnet / torrent ──
     "MAGNET_INVALID_URI": "the magnet URI is malformed",
     "MAGNET_INVALID_FILE": "the .torrent file is invalid",
+    "MAGNET_INVALID_ID": "the magnet id is invalid or unknown",
+    "MAGNET_NO_URI": "no magnet URI was provided",
     "MAGNET_TOO_MANY_ACTIVE": "too many active magnets on AllDebrid",
+    "MAGNET_TOO_MANY": "too many magnets on AllDebrid",
+    "MAGNET_TOO_LARGE": "the torrent is too large for AllDebrid",
+    "MAGNET_MAGNET_TOO_BIG": "the torrent is too big for AllDebrid",
+    "MAGNET_CANT_BOOTSTRAP": "AllDebrid could not find peers/metadata for this magnet (dead torrent)",
+    "MAGNET_LINKS_REMOVED": "the AllDebrid links for this magnet were removed (torrent may be dead)",
+    "MAGNET_PROCESSING_FAILED": "AllDebrid failed to process this magnet",
+    "MAGNET_UPLOAD_FAILED": "AllDebrid failed to upload this magnet",
+    "MAGNET_FILE_UPLOAD_FAILED": "AllDebrid failed to upload this .torrent file",
+    "MAGNET_TOOK_TOO_LONG": "AllDebrid took too long to process this magnet",
+    "MAGNET_NO_SERVER": "AllDebrid magnet servers are unavailable - try again shortly",
+    # ── service ──
     "NO_SERVER": "the AllDebrid server is unavailable - try again shortly",
+    "MAINTENANCE": "AllDebrid is under maintenance - try again later",
     "INFRA_ERROR": "the AllDebrid service is having a technical problem - try again shortly",
+    "NO_JSON_PARAM": "AllDebrid rejected the request (malformed parameters)",
+}
+
+# Codes that mean "the key is fine but the *subscription* is gone/limited".
+# These are surfaced with an explicit renew/trial hint instead of a bare code.
+_PREMIUM_CODES = {
+    "MUST_BE_PREMIUM",
+    "MAGNET_MUST_BE_PREMIUM",
+    "FREE_TRIAL_LIMIT_REACHED",
+    "ACCOUNT_INVALID",
 }
 
 
@@ -95,9 +138,11 @@ def _api_error_message(error: dict[str, Any], link: str) -> str:
     code = (error.get("code") or "UNKNOWN").strip()
     message = error.get("message") or ""
     friendly = _FRIENDLY_ERRORS.get(code) or message or "unknown website error (site problem)"
+    prefix = "AllDebrid subscription problem - " if code in _PREMIUM_CODES else "AllDebrid: "
+    tail = f" ({code})"
     if link:
-        return f"AllDebrid: {friendly} ({code}) | link: {link}"
-    return f"AllDebrid: {friendly} ({code})"
+        tail += f" | link: {link}"
+    return f"{prefix}{friendly}{tail}"
 
 
 async def _call_api(
@@ -745,3 +790,85 @@ async def alldebrid_resolve_torrent(
         except:
             pass
         raise
+
+
+# ── proactive account / key health check ──────────────────────────────
+
+
+async def alldebrid_check_account() -> dict[str, Any]:
+    """Probe the configured AllDebrid key and report what it resolves to.
+
+    Returns a dict (never raises for API-level problems) shaped like::
+
+        {"ok": bool, "code": str, "message": str, "username": str,
+         "premium": bool, "premium_until": str, "fidelity": int}
+
+    ``ok`` is only ``True`` when the key is valid AND the account is
+    premium, so callers can decide whether to warn the owner on startup or
+    whether ``-ad`` is usable at all.
+    """
+    try:
+        api_key = _ensure_api_key()
+    except DirectDownloadLinkException as exc:
+        return {
+            "ok": False,
+            "code": "AUTH_MISSING_APIKEY",
+            "message": str(exc).replace("ERROR: ", "").strip(),
+            "username": "",
+            "premium": False,
+            "premium_until": "",
+            "fidelity": 0,
+        }
+
+    try:
+        data = await _call_api(
+            "GET",
+            f"{_API_BASE}/user",
+            params={"agent": _AGENT, "apikey": api_key},
+        )
+    except DirectDownloadLinkException as exc:
+        text = str(exc).replace("ERROR: ", "").strip()
+        match = re.search(r"\(([A-Z0-9_]+)\)\s*$", text)
+        code = match[1] if match else "UNREACHABLE"
+        return {
+            "ok": False,
+            "code": code,
+            "message": text,
+            "username": "",
+            "premium": False,
+            "premium_until": "",
+            "fidelity": 0,
+        }
+
+    user = data.get("user") or {}
+    if not isinstance(user, dict):
+        user = {}
+    premium = bool(user.get("isPremium"))
+    premium_until = ""
+    if until := int(user.get("premiumUntil") or 0):
+        premium_until = datetime.fromtimestamp(until, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
+
+    if not user:
+        code = "NO_USER"
+        message = "AllDebrid did not return account info for this key"
+    elif premium:
+        code = "OK"
+        message = f"premium active until {premium_until}" if premium_until else "premium active"
+    else:
+        code = "MUST_BE_PREMIUM"
+        message = (
+            "the key is valid but the account is NOT premium (subscription "
+            "expired or never activated) - renew at https://alldebrid.com/premium"
+        )
+
+    return {
+        "ok": premium,
+        "code": code,
+        "message": message,
+        "username": str(user.get("username") or ""),
+        "premium": premium,
+        "premium_until": premium_until,
+        "fidelity": int(user.get("fidelityPoints") or 0),
+    }

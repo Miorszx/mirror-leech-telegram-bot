@@ -5,6 +5,49 @@ from .core.config_manager import Config
 Config.load()
 
 
+async def _notify_alldebrid_status():
+    """Probe the AllDebrid key once on startup and DM the owner if it is broken.
+
+    Silent when the key is fine or not configured at all - only warns when the
+    configured key is invalid/blocked/expired so the owner learns about it
+    before the first failed task.
+    """
+    if not (Config.ALLDEBRID_API_KEY or "").strip():
+        return
+    try:
+        from .helper.mirror_leech_utils.download_utils.alldebrid_resolver import (
+            alldebrid_check_account,
+        )
+
+        result = await alldebrid_check_account()
+    except Exception as e:  # never break startup over a health probe
+        LOGGER.warning(f"AllDebrid startup check failed: {e}")
+        return
+
+    if result.get("ok"):
+        LOGGER.info(
+            f"AllDebrid key OK (user={result.get('username')}, "
+            f"premium until {result.get('premium_until') or 'n/a'})"
+        )
+        return
+
+    LOGGER.warning(
+        f"AllDebrid key problem: {result.get('code')} - {result.get('message')}"
+    )
+    if Config.OWNER_ID and TgClient.bot is not None:
+        try:
+            await TgClient.bot.send_message(
+                Config.OWNER_ID,
+                "⚠️ <b>AllDebrid key problem</b>\n\n"
+                f"{result.get('message')}\n\n"
+                f"<code>{result.get('code')}</code>\n\n"
+                "Update <code>ALLDEBRID_API_KEY</code> and restart, "
+                "or renew the subscription.",
+            )
+        except Exception as e:
+            LOGGER.warning(f"Could not DM owner about AllDebrid key: {e}")
+
+
 async def main():
     from asyncio import gather
     from .core.startup import (
@@ -49,6 +92,7 @@ async def main():
         restart_notification(),
         telegraph.create_account(),
         rclone_serve_booter(),
+        _notify_alldebrid_status(),
     )
 
 
