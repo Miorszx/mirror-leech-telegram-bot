@@ -7,5 +7,11 @@ aria2c --allow-overwrite=true --auto-file-renaming=true --bt-enable-lpd=true --b
        --http-accept-gzip=true --max-file-not-found=0 --max-tries=20  --peer-id-prefix=-qB4520- --reuse-uri=true \
        --content-disposition-default-utf8=true --user-agent=Wget/1.12 --peer-agent=qBittorrent/4.5.2 --quiet=true \
        --summary-interval=0 --max-upload-limit=1K
+# qBittorrent is SIGKILLed on container stop/restart (PID 1 is bash, which does
+# not forward SIGTERM to it), so it can never remove its own lockfile. On the
+# next boot `qbittorrent-nox -d` then sees that stale lock and refuses to start
+# ("already running"), leaving WebUI :8090 down and crash-looping the bot.
+# Drop the lock only when no qBittorrent process is actually alive.
+pgrep -x qbittorrent-nox >/dev/null 2>&1 || rm -f "$(pwd)/qBittorrent/config/lockfile"
 qbittorrent-nox -d --profile="$(pwd)"
 sabnzbdplus -f sabnzbd/SABnzbd.ini -s :::8070 -b 0 -d -c -l 0 --console
