@@ -1,79 +1,112 @@
-"""Tests for the new ``-ad`` and ``-bh`` CLI flags."""
+"""Parsing tests for the ``-ad`` (AllDebrid) boolean flag.
+
+These exercise ``arg_parser`` in isolation, so they run on any python
+without the bot runtime (pyrogram / aiofiles). The end-to-end coverage that
+drives ``Mirror.new_event`` lives in ``test_ad_flag_all_commands.py``.
+"""
 
 from __future__ import annotations
 
-import importlib
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 
-def _stub_bot_package(monkeypatch):
-    bot_pkg = ModuleType("bot")
-    bot_pkg.LOGGER = type("L", (), {"info": staticmethod(lambda *a, **k: None)})
-    helper_pkg = ModuleType("bot.helper")
-    ext_utils_pkg = ModuleType("bot.helper.ext_utils")
-    monkeypatch.setitem(sys.modules, "bot", bot_pkg)
-    monkeypatch.setitem(sys.modules, "bot.helper", helper_pkg)
-    monkeypatch.setitem(sys.modules, "bot.helper.ext_utils", ext_utils_pkg)
+def _load_arg_parser(monkeypatch):
+    # Stub the package chain so bot_utils can be sliced out of source without
+    # importing the Telegram / DB stack.
+    for name in ("bot", "bot.helper", "bot.helper.ext_utils"):
+        pkg = ModuleType(name)
+        pkg.__path__ = []
+        monkeypatch.setitem(sys.modules, name, pkg)
 
-
-@pytest.fixture
-def arg_parser(monkeypatch):
-    """Import only ``arg_parser`` from bot_utils without firing module-level
-    side effects elsewhere in the package."""
-    _stub_bot_package(monkeypatch)
-    sys.modules.pop("bot.helper.ext_utils.bot_utils", None)
-    # ``bot_utils`` itself imports several Telegram-only helpers, so we
-    # load it from source via execfile-style trick to avoid pulling in
-    # the full bot stack.
-    from importlib import util
-    from pathlib import Path
-
-    file_path = (
+    src_path = (
         Path(__file__).resolve().parent.parent
         / "bot"
         / "helper"
         / "ext_utils"
         / "bot_utils.py"
     )
-    src = file_path.read_text(encoding="utf-8")
-    # Strip imports that drag in Telegram + DB dependencies; we only
-    # need ``arg_parser`` for these tests.
-    namespace: dict[str, object] = {}
-    # Provide minimal stubs the function references.
-    namespace["loads"] = __import__("ast").literal_eval
-    snippet_start = src.find("def arg_parser(")
-    snippet_end = src.find("\ndef ", snippet_start + 1)
-    if snippet_end == -1:
-        snippet_end = len(src)
-    snippet = src[snippet_start:snippet_end]
+    src = src_path.read_text(encoding="utf-8")
+    start = src.find("def arg_parser(")
+    end = src.find("\ndef ", start + 1)
+    snippet = src[start : end if end != -1 else len(src)]
+
+    namespace: dict = {"loads": __import__("ast").literal_eval}
     exec(snippet, namespace)  # noqa: S102 - test-only controlled exec
     return namespace["arg_parser"]
 
 
-def test_ad_bool_flag_set(arg_parser):
-    args = {"-ad": False, "-bh": False, "-z": False, "link": ""}
+@pytest.fixture
+def arg_parser(monkeypatch):
+    return _load_arg_parser(monkeypatch)
+
+
+def _base(**extra):
+    args = {"-ad": False, "-z": False, "-d": False, "link": ""}
+    args.update(extra)
+    return args
+
+
+def test_ad_after_link(arg_parser):
+    args = _base()
     arg_parser(["http://x", "-ad"], args)
     assert args["-ad"] is True
     assert args["link"] == "http://x"
 
 
-def test_bh_bool_flag_set(arg_parser):
-    args = {"-ad": False, "-bh": False, "link": ""}
-    arg_parser(["http://x", "-bh"], args)
-    assert args["-bh"] is True
-
-
-def test_ad_and_bh_combined(arg_parser):
-    args = {"-ad": False, "-bh": False, "link": ""}
-    arg_parser(["http://x", "-ad", "-bh"], args)
+def test_ad_alone_is_true(arg_parser):
+    args = _base()
+    arg_parser(["-ad"], args)
     assert args["-ad"] is True
-    assert args["-bh"] is True
 
 
-def test_unknown_flag_left_alone(arg_parser):
+def test_ad_does_not_swallow_link_as_value(arg_parser):
+    # -ad is boolean: a following magnet must NOT be consumed as its value.
+    args = _base()
+    arg_parser(["magnet:?xt=urn:btih:abcd", "-ad"], args)
+    assert args["-ad"] is True
+    assert args["link"] == "magnet:?xt=urn:btih:abcd"
+
+
+def test_ad_with_value_flag_after(arg_parser):
+    args = _base()
+    arg_parser(["http://x", "-ad", "-z", "pw"], args)
+    assert args["-ad"] is True
+    assert args["-z"] == "pw"
+    assert args["link"] == "http://x"
+
+
+def test_ad_before_value_flag(arg_parser):
+    args = _base()
+    arg_parser(["http://x", "-z", "pw", "-ad"], args)
+    assert args["-ad"] is True
+    assert args["-z"] == "pw"
+
+
+def test_ad_with_reply_no_link(arg_parser):
     args = {"-ad": False, "link": ""}
-    arg_parser(["http://x", "-unknown"], args)
+    arg_parser(["-ad"], args)
+    assert args["-ad"] is True
+    assert args["link"] == ""
+
+
+def test_unknown_flag_is_not_treated_as_ad(arg_parser):
+    # Unknown tokens are not flags, so they stay glued to the link text and
+    # must not flip -ad.
+    args = _base()
+    arg_parser(["http://x", "-nope"], args)
     assert args["-ad"] is False
+    assert args["link"] == "http://x -nope"
+
+
+def test_link_before_every_flag_is_required_upstream(arg_parser):
+    # Documents upstream behaviour: only tokens *before* the first flag become
+    # the link, so a flag placed in front of the link drops it. This is true
+    # for every flag (-ad, -z, -d, -up ...), not specific to -ad.
+    args = _base()
+    arg_parser(["-ad", "http://x"], args)
+    assert args["-ad"] is True
+    assert args["link"] == ""
