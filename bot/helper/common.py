@@ -301,7 +301,13 @@ class TaskConfig:
                 default_upload = "gd"
             elif _explicit == "rc" or is_rclone_path(_explicit):
                 default_upload = "rc"
-        if default_upload == "bh" or _is_bh_dest:
+        # DEFAULT_UPLOAD only chooses a *mirror* backend. Leech commands must
+        # never be routed to BuzzHeavier/GoFile: if they are, `is_buzzheavier`
+        # becomes True and the leech branch below (which computes split_size,
+        # thumbnail, as_doc, ...) is skipped, leaving split_size == 0 and
+        # crashing proceed_split with ZeroDivisionError. Matches the documented
+        # contract: "DEFAULT_UPLOAD doesn't affect on leech cmds."
+        if not self.is_leech and (default_upload == "bh" or _is_bh_dest):
             if not self.up_dest and default_upload == "bh":
                 self.up_dest = (
                     self.user_dict.get("BUZZHEAVIER_FOLDER_ID")
@@ -321,7 +327,7 @@ class TaskConfig:
             # a config account_id. Only `mt:bh` (upload to the user's own account)
             # requires BUZZHEAVIER_ACCOUNT_ID, which is enforced above.
             self.is_buzzheavier = True
-        elif default_upload == "gf" or self.up_dest == "gf":
+        elif not self.is_leech and (default_upload == "gf" or self.up_dest == "gf"):
             self.is_gofile = True
 
         if not self.is_leech and not self.is_buzzheavier and not self.is_gofile:
