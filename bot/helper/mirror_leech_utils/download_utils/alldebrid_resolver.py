@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlparse
 
-from httpx import AsyncClient, HTTPError
+from httpx import AsyncClient, HTTPError, HTTPStatusError
 
 from bot import LOGGER
 from bot.core.config_manager import Config
@@ -40,6 +40,13 @@ _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
+
+# ``.torrent`` fetches hit public trackers that sit behind bot-protection
+# (DDoS-Guard, Cloudflare). A cold client can get a transient 404/429/5xx
+# on the first try that succeeds moments later, so retry a few times with
+# a short linear backoff before giving up.
+_URL_FETCH_ATTEMPTS = 3
+_URL_FETCH_BACKOFF_S = 2.0
 
 _MAGNET_POLL_INTERVAL_S = 5.0
 _MAGNET_NO_SEED_TIMEOUT_S = 180.0
@@ -212,25 +219,101 @@ def basename_from_url(link: str) -> str:
     return name or "file"
 
 
+# HTTP statuses that bot-protection (DDoS-Guard / Cloudflare) commonly
+# returns transiently for a cold client but that clear up on retry.
+_RETRYABLE_STATUS = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
+
+# A real ``.torrent`` is a bencoded dict starting with ``d`` (``d8:announce``).
+# Anything that looks like HTML/markup means we were served a page, not a file.
+_WEB_PAGE_PREFIXES = (b"<!doctype", b"<html", b"<?xml", b"<head", b"<body")
+
+
+def _looks_like_web_page(content: bytes) -> bool:
+    head = content.lstrip()[:64].lower()
+    return head.startswith(_WEB_PAGE_PREFIXES)
+
+
+def _torrent_fetch_error_message(url: str, status: int) -> str:
+    host = urlparse(url).netloc or url
+    if status == 404:
+        return (
+            f"ERROR: {host} returned 404 Not Found for the torrent. The link "
+            "may be dead, or the tracker is briefly rate-limiting the bot — "
+            "try the command again in a few seconds."
+        )
+    if status in (429, 503):
+        return (
+            f"ERROR: {host} is rate-limiting the bot (HTTP {status}). Wait a "
+            "few seconds and try the command again."
+        )
+    return f"ERROR: Cannot download the torrent file from {host} (HTTP {status})."
+
+
 async def fetch_url_bytes(url: str) -> bytes:
     """Download a small remote file (e.g. a ``.torrent``) into memory.
 
     ``aiofiles.open`` only handles local paths, so a ``.torrent`` served over
     HTTP (e.g. ``https://<tracker>/download/<id>.torrent``) must be fetched
     with an HTTP client first.
+
+    Public trackers commonly sit behind bot-protection that answers a cold
+    client with a transient ``404`` / ``429`` / ``5xx`` that succeeds moments
+    later. We therefore retry a few times with a short backoff and surface a
+    status-specific message so a genuine dead link is distinguishable from a
+    momentary hiccup.
     """
-    headers = {"User-Agent": _USER_AGENT}
-    try:
-        async with AsyncClient(
-            timeout=_TIMEOUT, headers=headers, follow_redirects=True
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.content
-    except HTTPError as exc:
-        raise DirectDownloadLinkException(
-            f"ERROR: Cannot download the torrent file (network/timeout problem): {exc}"
-        ) from exc
+    host = urlparse(url).netloc or url
+    headers = {
+        "User-Agent": _USER_AGENT,
+        "Accept": "*/*",
+        "Referer": f"https://{host}/" if host else "",
+    }
+
+    last_exc: Exception | None = None
+    async with AsyncClient(
+        timeout=_TIMEOUT, headers=headers, follow_redirects=True
+    ) as client:
+        for attempt in range(1, _URL_FETCH_ATTEMPTS + 1):
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except HTTPStatusError as exc:
+                last_exc = exc
+                status = exc.response.status_code
+                if status in _RETRYABLE_STATUS and attempt < _URL_FETCH_ATTEMPTS:
+                    await asyncio.sleep(attempt * _URL_FETCH_BACKOFF_S)
+                    continue
+                raise DirectDownloadLinkException(
+                    _torrent_fetch_error_message(url, status)
+                ) from exc
+            except HTTPError as exc:
+                last_exc = exc
+                if attempt < _URL_FETCH_ATTEMPTS:
+                    await asyncio.sleep(attempt * _URL_FETCH_BACKOFF_S)
+                    continue
+                raise DirectDownloadLinkException(
+                    f"ERROR: Cannot download the torrent file from {host}: "
+                    f"network problem ({exc.__class__.__name__})"
+                ) from exc
+
+            content = response.content
+            if not content:
+                raise DirectDownloadLinkException(
+                    f"ERROR: {host} returned an empty response instead of a "
+                    "torrent file."
+                )
+            if _looks_like_web_page(content):
+                raise DirectDownloadLinkException(
+                    f"ERROR: {host} returned a web page instead of a torrent "
+                    "file (the link may need a login or the tracker is "
+                    "blocking the bot)."
+                )
+            return content
+
+    # Unreachable: the loop always returns or raises.
+    raise DirectDownloadLinkException(
+        f"ERROR: Cannot download the torrent file from {host}: {last_exc}"
+    )
 
 
 # ── filehost link unlock ──────────────────────────────────────────────

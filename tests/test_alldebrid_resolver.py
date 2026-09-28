@@ -7,6 +7,7 @@ import sys
 from types import ModuleType
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 
@@ -150,7 +151,7 @@ async def test_resolve_no_link_no_streams_raises(alldebrid_module, monkeypatch):
     monkeypatch.setattr(alldebrid_module, "_call_api", fake_call)
     with pytest.raises(Exception) as exc_info:
         await alldebrid_module.alldebrid_resolve("https://x.example/file")
-    assert "did not return a usable download link" in str(exc_info.value)
+    assert "could not find a download link" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -207,3 +208,117 @@ async def test_check_supported_matches_active_host(
     assert not await alldebrid_module.alldebrid_check_supported(
         "https://dead.example.com/x"
     )
+
+
+_TORRENT_BYTES = b"d8:announce25:http://tracker.example/ann4:infod4:name4:xee"
+
+
+def _patch_transport(monkeypatch, module, handler):
+    """Route the resolver's own ``AsyncClient`` through a mock transport."""
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return httpx.AsyncClient(*args, **kwargs)
+
+    monkeypatch.setattr(module, "AsyncClient", factory)
+    monkeypatch.setattr(module, "_URL_FETCH_BACKOFF_S", 0.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_bytes_returns_torrent(alldebrid_module, monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, content=_TORRENT_BYTES)
+
+    _patch_transport(monkeypatch, alldebrid_module, handler)
+    out = await alldebrid_module.fetch_url_bytes(
+        "https://tracker.example/download/1.torrent"
+    )
+    assert out == _TORRENT_BYTES
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_bytes_retries_transient_404(
+    alldebrid_module, monkeypatch
+):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(404, content=b"not found")
+        return httpx.Response(200, content=_TORRENT_BYTES)
+
+    _patch_transport(monkeypatch, alldebrid_module, handler)
+    out = await alldebrid_module.fetch_url_bytes(
+        "https://tracker.example/download/1.torrent"
+    )
+    assert out == _TORRENT_BYTES
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_bytes_gives_up_after_retries(
+    alldebrid_module, monkeypatch
+):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404, content=b"nope")
+
+    _patch_transport(monkeypatch, alldebrid_module, handler)
+    with pytest.raises(Exception) as exc_info:
+        await alldebrid_module.fetch_url_bytes(
+            "https://tracker.example/download/dead.torrent"
+        )
+    assert "404 Not Found" in str(exc_info.value)
+    assert calls["n"] == alldebrid_module._URL_FETCH_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_bytes_reports_rate_limit(
+    alldebrid_module, monkeypatch
+):
+    def handler(request):
+        return httpx.Response(429, content=b"slow down")
+
+    _patch_transport(monkeypatch, alldebrid_module, handler)
+    with pytest.raises(Exception) as exc_info:
+        await alldebrid_module.fetch_url_bytes(
+            "https://tracker.example/download/1.torrent"
+        )
+    assert "rate-limiting" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_bytes_rejects_web_page(
+    alldebrid_module, monkeypatch
+):
+    def handler(request):
+        return httpx.Response(
+            200, content=b"<!DOCTYPE html><html><body>login</body></html>"
+        )
+
+    _patch_transport(monkeypatch, alldebrid_module, handler)
+    with pytest.raises(Exception) as exc_info:
+        await alldebrid_module.fetch_url_bytes(
+            "https://tracker.example/download/1.torrent"
+        )
+    assert "web page" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_url_bytes_rejects_empty(alldebrid_module, monkeypatch):
+    def handler(request):
+        return httpx.Response(200, content=b"")
+
+    _patch_transport(monkeypatch, alldebrid_module, handler)
+    with pytest.raises(Exception) as exc_info:
+        await alldebrid_module.fetch_url_bytes(
+            "https://tracker.example/download/1.torrent"
+        )
+    assert "empty response" in str(exc_info.value)
