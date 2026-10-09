@@ -152,6 +152,51 @@ def _api_error_message(error: dict[str, Any], link: str) -> str:
     return f"{prefix}{friendly}{tail}"
 
 
+def _human_size(num_bytes: Any) -> str:
+    """Compact human-readable byte size (no external deps)."""
+    try:
+        size = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        return "0B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.2f}{unit}"
+        size /= 1024
+    return f"{size:.2f}TB"
+
+
+def format_magnet_progress(snapshot: dict[str, Any]) -> str:
+    """Turn a resolver progress snapshot into one short, user-facing line.
+
+    Consumes both the torrent poll snapshots (``{"phase": "torrent",
+    "statusCode": ...}``) and the unlock snapshots (``{"unlock_done": ...}``)
+    emitted by :func:`alldebrid_resolve_magnet` /
+    :func:`alldebrid_resolve_torrent`, so callers can drive a live progress
+    message without duplicating status-code knowledge.
+    """
+    if "unlock_done" in snapshot:
+        done = int(snapshot.get("unlock_done", 0) or 0)
+        total = int(snapshot.get("unlock_total", 0) or 0)
+        return f"AllDebrid: generating direct links {done}/{total}"
+
+    code = int(snapshot.get("statusCode", 0) or 0)
+    label = _MAGNET_STATUS_LABELS.get(code, str(snapshot.get("status", "unknown")))
+    bits = [f"AllDebrid: {label}"]
+
+    size = int(snapshot.get("size", 0) or 0)
+    downloaded = int(snapshot.get("downloaded", 0) or 0)
+    if size:
+        pct = (downloaded / size * 100.0) if downloaded else 0.0
+        bits.append(f"{pct:.1f}%")
+        bits.append(f"{_human_size(downloaded)}/{_human_size(size)}")
+
+    perc = snapshot.get("processingPerc")
+    if perc:
+        bits.append(f"processing {perc}%")
+
+    return " | ".join(bits)
+
+
 async def _call_api(
     method: str,
     url: str,
@@ -594,7 +639,15 @@ async def get_magnet_status(magnet_id: int) -> dict[str, Any]:
 
 
 async def delete_magnet(magnet_id: int) -> bool:
-    """Best-effort: delete a magnet from the AllDebrid history."""
+    """Best-effort, idempotent: delete a magnet from the AllDebrid history.
+
+    Cleanup runs from two places (the resolver's ``except`` block and the
+    task listener's error handler), so the same magnet id may be deleted
+    twice. AllDebrid dedups by info-hash and a second delete therefore
+    returns ``MAGNET_INVALID_ID`` — that is NOT a failure: the magnet is
+    already gone. Treat it as a successful no-op so it never bubbles up as
+    a bogus user-facing error.
+    """
     try:
         await _post_form(
             f"{_API_BASE_V4}/magnet/delete",
@@ -603,6 +656,9 @@ async def delete_magnet(magnet_id: int) -> bool:
         LOGGER.info(f"Deleted AllDebrid magnet {magnet_id}")
         return True
     except DirectDownloadLinkException as exc:
+        if "MAGNET_INVALID_ID" in str(exc) or "MAGNET_NOT_FOUND" in str(exc):
+            LOGGER.info(f"AllDebrid magnet {magnet_id} already deleted (idempotent)")
+            return True
         LOGGER.warning(f"Failed to delete AllDebrid magnet {magnet_id}: {exc}")
         return False
 
@@ -717,10 +773,16 @@ async def alldebrid_resolve_magnet(
     name = entry.get("name") or basename_from_url(magnet) or "torrent"
 
     try:
-        no_seed_since = 0.0
         loop = asyncio.get_event_loop()
         start_time = loop.time()
 
+        # AllDebrid v4.1 no longer returns a ``seeders`` field in the magnet
+        # status payload, so a "0 seeders" reading is meaningless. A torrent is
+        # only treated as dead when AllDebrid itself reports a terminal error
+        # (statusCode in _MAGNET_ERROR_CODES - e.g. 14 "tracker error - no
+        # peers" / 15 "no peers - torrent dead"). A live torrent may sit in
+        # queue / downloading for many minutes, so we keep polling until the
+        # absolute max_duration ceiling instead of a bogus short timeout.
         while True:
             if is_cancelled is not None and is_cancelled():
                 raise DirectDownloadLinkException(
@@ -729,7 +791,6 @@ async def alldebrid_resolve_magnet(
 
             status = await get_magnet_status(magnet_id)
             status_code = int(status.get("statusCode", 0) or 0)
-            seeders = int(status.get("seeders", 0) or 0)
 
             if progress_callback is not None:
                 await progress_callback({"phase": "torrent", **status})
@@ -746,16 +807,6 @@ async def alldebrid_resolve_magnet(
                 )
 
             now = loop.time()
-            if seeders == 0:
-                if no_seed_since == 0.0:
-                    no_seed_since = now
-                elif now - no_seed_since >= no_seed_timeout:
-                    raise DirectDownloadLinkException(
-                        f"ERROR: AllDebrid torrent has no seeders (dead torrent) - gave up after {int(no_seed_timeout)}s"
-                    )
-            else:
-                no_seed_since = 0.0
-
             if now - start_time >= max_duration:
                 raise DirectDownloadLinkException(
                     f"ERROR: AllDebrid torrent took too long / timed out after {int(max_duration)}s"
@@ -822,9 +873,11 @@ async def alldebrid_resolve_torrent(
     max_duration = float(kwargs.get("max_duration", _MAGNET_MAX_DURATION_S))
 
     try:
-        no_seed_since = 0.0
         loop = asyncio.get_event_loop()
         start_time = loop.time()
+        # Same reasoning as alldebrid_resolve_magnet: v4.1 status has no
+        # ``seeders`` field, so we only abort on a terminal AllDebrid error
+        # code or the absolute max_duration ceiling.
         while True:
             if is_cancelled is not None and is_cancelled():
                 raise DirectDownloadLinkException(
@@ -833,7 +886,6 @@ async def alldebrid_resolve_torrent(
 
             status = await get_magnet_status(magnet_id)
             status_code = int(status.get("statusCode", 0) or 0)
-            seeders = int(status.get("seeders", 0) or 0)
 
             if progress_callback is not None:
                 await progress_callback({"phase": "torrent", **status})
@@ -850,16 +902,6 @@ async def alldebrid_resolve_torrent(
                 )
 
             now = loop.time()
-            if seeders == 0:
-                if no_seed_since == 0.0:
-                    no_seed_since = now
-                elif now - no_seed_since >= no_seed_timeout:
-                    raise DirectDownloadLinkException(
-                        f"ERROR: AllDebrid torrent has no seeders (dead torrent) - gave up after {int(no_seed_timeout)}s"
-                    )
-            else:
-                no_seed_since = 0.0
-
             if now - start_time >= max_duration:
                 raise DirectDownloadLinkException(
                     f"ERROR: AllDebrid torrent took too long / timed out after {int(max_duration)}s"

@@ -31,6 +31,7 @@ from ..helper.mirror_leech_utils.download_utils.alldebrid_resolver import (
     alldebrid_resolve,
     alldebrid_resolve_magnet,
     alldebrid_resolve_torrent,
+    format_magnet_progress,
 )
 from ..helper.mirror_leech_utils.download_utils.torbox_resolver import (
     torbox_resolve,
@@ -56,7 +57,12 @@ from ..helper.mirror_leech_utils.download_utils.rclone_download import (
 from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
-from ..helper.telegram_helper.message_utils import send_message, get_tg_link_message
+from ..helper.telegram_helper.message_utils import (
+    send_message,
+    edit_message,
+    delete_message,
+    get_tg_link_message,
+)
 
 
 class Mirror(TaskListener):
@@ -374,12 +380,32 @@ class Mirror(TaskListener):
         if self.is_alldebrid and (
             is_magnet(self.link) or self.link.endswith(".torrent")
         ):
+            # Live progress message: the resolver emits status snapshots
+            # every poll (queue/downloading/compressing/ready + %) but the
+            # resolve phase runs BEFORE the task is registered in
+            # status_dict, so without this the bot looks silent for minutes.
+            # Wire the existing snapshots into a single editable message.
+            progress_msg = await send_message(self.message, "AllDebrid: starting…")
+            last_progress_text = "AllDebrid: starting…"
+
+            async def _alldebrid_progress(snapshot):
+                nonlocal last_progress_text
+                try:
+                    text = format_magnet_progress(snapshot)
+                except Exception:
+                    return
+                if text == last_progress_text:
+                    return
+                if await edit_message(progress_msg, text):
+                    last_progress_text = text
+
             try:
                 if is_magnet(self.link):
                     LOGGER.info("AllDebrid magnet route")
                     resolved = await alldebrid_resolve_magnet(
                         self.link,
                         is_cancelled=lambda: self.is_cancelled,
+                        progress_callback=_alldebrid_progress,
                     )
                 else:
                     LOGGER.info(f"AllDebrid torrent file route: {self.link}")
@@ -392,19 +418,23 @@ class Mirror(TaskListener):
                         torrent_bytes,
                         ospath.basename(self.link),
                         is_cancelled=lambda: self.is_cancelled,
+                        progress_callback=_alldebrid_progress,
                     )
             except DirectDownloadLinkException as e:
                 msg = str(e)
                 LOGGER.info(msg)
+                await delete_message(progress_msg)
                 if msg.startswith("ERROR:"):
                     await send_message(self.message, msg)
                     await self.remove_from_same_dir()
                     return
                 resolved = None
             except Exception as e:
+                await delete_message(progress_msg)
                 await send_message(self.message, e)
                 await self.remove_from_same_dir()
                 return
+            await delete_message(progress_msg)
             if isinstance(resolved, dict):
                 self._alldebrid_magnet_id = resolved.get("magnet_id", 0)
                 self.link = resolved
