@@ -30,6 +30,8 @@ class AllDebridStatus:
         self._phase = "In queue"
         self._size = 0
         self._downloaded = 0
+        self._seeders = 0
+        self._has_seeders = False
         self._speed = 0
         self._last_time = 0.0
         self._last_downloaded = 0
@@ -57,6 +59,20 @@ class AllDebridStatus:
         self._phase = _MAGNET_STATUS_LABELS.get(
             code, str(snapshot.get("status", "processing"))
         )
+
+        # AllDebrid only includes the ``seeders`` field while it is actively
+        # downloading an uncached (or partially cached) torrent. Its absence
+        # simply means "no live swarm figure for this phase" (queued, ready,
+        # compressing, ...), so the peer line is presence-driven: it appears
+        # with the swarm and disappears once the swarm figure is gone.
+        if "seeders" in snapshot:
+            try:
+                self._seeders = int(snapshot.get("seeders", 0) or 0)
+                self._has_seeders = True
+            except (TypeError, ValueError):
+                self._has_seeders = False
+        else:
+            self._has_seeders = False
 
         speed = snapshot.get("downloadSpeed")
         if speed is None:
@@ -102,6 +118,18 @@ class AllDebridStatus:
 
     def speed(self):
         return f"{get_readable_file_size(self._speed)}/s"
+
+    def has_peers(self):
+        return self._has_seeders
+
+    def seeders_num(self):
+        return self._seeders
+
+    def leechers_num(self):
+        # The v4.1 magnet status payload exposes active ``seeders`` only; it
+        # carries no leecher figure, so we report it as unknown rather than
+        # inventing a 0.
+        return "-"
 
     def eta(self):
         try:

@@ -223,6 +223,11 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
                     msg += f"<br><b>Seeders:</b> {task.seeders_num()} | <b>Leechers:</b> {task.leechers_num()}"
                 except:
                     pass
+            if tstatus == MirrorStatus.STATUS_ALLDEBRID and task.has_peers():
+                msg += (
+                    f"<br><b>Seeders:</b> {task.seeders_num()}"
+                    f" | <b>Leechers:</b> {task.leechers_num()}"
+                )
         elif tstatus == MirrorStatus.STATUS_SEED:
             msg += f"<br><b>Size: </b>{task.size()}"
             msg += f"<br><b>Speed: </b>{task.seed_speed()}"
