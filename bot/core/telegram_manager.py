@@ -4,6 +4,7 @@ from asyncio import Lock
 
 from .. import LOGGER
 from .config_manager import Config
+from . import parallel_upload  # noqa: F401  (applies multi-connection upload patch)
 
 
 class TgClient:
