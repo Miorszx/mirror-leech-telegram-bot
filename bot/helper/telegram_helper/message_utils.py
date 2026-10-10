@@ -266,15 +266,36 @@ async def send_status_message(msg, user_id=0):
                     del intervals["status"][sid]
                 return
             old_message = status_dict[sid]["message"]
-            message = await send_rich_message(msg, text, buttons, block=False)
-            if isinstance(message, str):
-                LOGGER.error(
-                    f"Status with id: {sid} haven't been sent. Error: {message}"
+            # A live status message already exists for this chat: refresh it in
+            # place. Deleting and resending here is what made a second status
+            # call (e.g. the resolve -> download hand-off, or adding a task)
+            # blink the message away and pop a brand new one.
+            if text != old_message.text:
+                refreshed = await edit_message(
+                    old_message, None, buttons, block=False, rich_message=text
                 )
-                return
-            await delete_message(old_message)
-            message.text = text
-            status_dict[sid].update({"message": message, "time": time()})
+                if isinstance(refreshed, str):
+                    if refreshed.startswith("Telegram says: [40"):
+                        # Message is gone / no longer editable -> resend once.
+                        refreshed = await send_rich_message(
+                            msg, text, buttons, block=False
+                        )
+                        if isinstance(refreshed, str):
+                            LOGGER.error(
+                                f"Status with id: {sid} haven't been sent. Error: {refreshed}"
+                            )
+                            return
+                        await delete_message(old_message)
+                        old_message = refreshed
+                    else:
+                        LOGGER.error(
+                            f"Status with id: {sid} haven't been updated. Error: {refreshed}"
+                        )
+                        return
+                old_message.text = text
+                status_dict[sid].update({"message": old_message, "time": time()})
+            else:
+                status_dict[sid]["time"] = time()
         else:
             text, buttons = await get_readable_message(sid, is_user)
             if text is None:
