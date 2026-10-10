@@ -27,6 +27,7 @@ class MirrorStatus:
     STATUS_SAMVID = "SamVid"
     STATUS_CONVERT = "Convert"
     STATUS_FFMPEG = "FFmpeg"
+    STATUS_ALLDEBRID = "AllDebrid"
 
 
 STATUSES = {
@@ -184,10 +185,13 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
             tstatus = await task.status()
         else:
             tstatus = task.status()
+        display_status = tstatus
+        if tstatus == MirrorStatus.STATUS_ALLDEBRID:
+            display_status = f"{tstatus}: {task.phase()}"
         if task.listener.is_super_chat:
-            msg += f"<b>{index + start_position}.<a href='{task.listener.message.link}'>{tstatus}</a>: </b>"
+            msg += f"<b>{index + start_position}.<a href='{task.listener.message.link}'>{display_status}</a>: </b>"
         else:
-            msg += f"<b>{index + start_position}.{tstatus}: </b>"
+            msg += f"<b>{index + start_position}.{display_status}: </b>"
         msg += f"<code>{escape(f'{task.name()}')}</code>"
         if task.listener.subname:
             msg += f"<br><i>{task.listener.subname}</i>"

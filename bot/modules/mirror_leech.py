@@ -3,9 +3,10 @@ from aiofiles.os import path as aiopath
 from os import path as ospath
 from base64 import b64encode
 from re import match as re_match
+from secrets import token_urlsafe
 from pyrogram.types import RichTextUrl
 
-from .. import LOGGER, bot_loop, task_dict_lock, DOWNLOAD_DIR
+from .. import LOGGER, bot_loop, task_dict, task_dict_lock, DOWNLOAD_DIR
 from ..helper.ext_utils.bot_utils import (
     get_content_type,
     sync_to_async,
@@ -31,7 +32,9 @@ from ..helper.mirror_leech_utils.download_utils.alldebrid_resolver import (
     alldebrid_resolve,
     alldebrid_resolve_magnet,
     alldebrid_resolve_torrent,
-    format_magnet_progress,
+)
+from ..helper.mirror_leech_utils.status_utils.alldebrid_status import (
+    AllDebridStatus,
 )
 from ..helper.mirror_leech_utils.download_utils.torbox_resolver import (
     torbox_resolve,
@@ -59,8 +62,8 @@ from ..helper.mirror_leech_utils.download_utils.telegram_download import (
 )
 from ..helper.telegram_helper.message_utils import (
     send_message,
-    edit_message,
-    delete_message,
+    send_status_message,
+    update_status_message,
     get_tg_link_message,
 )
 
@@ -380,24 +383,38 @@ class Mirror(TaskListener):
         if self.is_alldebrid and (
             is_magnet(self.link) or self.link.endswith(".torrent")
         ):
-            # Live progress message: the resolver emits status snapshots
-            # every poll (queue/downloading/compressing/ready + %) but the
-            # resolve phase runs BEFORE the task is registered in
-            # status_dict, so without this the bot looks silent for minutes.
-            # Wire the existing snapshots into a single editable message.
-            progress_msg = await send_message(self.message, "AllDebrid: starting…")
-            last_progress_text = "AllDebrid: starting…"
+            # Single evolving status message: register an AllDebridStatus in
+            # task_dict under the SAME mid as the eventual download and push
+            # resolver snapshots into it. The aggregated status message (and
+            # its SetInterval refresher) is created NOW, so the resolve phase
+            # is no longer silent and the very same message keeps living once
+            # the direct links are ready - it just swaps AllDebridStatus for
+            # DirectStatus/QueueStatus under the same mid.
+            alldebrid_gid = token_urlsafe(10)
+            alldebrid_status = AllDebridStatus(self, alldebrid_gid)
+            async with task_dict_lock:
+                task_dict[self.mid] = alldebrid_status
+            if self.multi <= 1 and not self.is_rss:
+                await send_status_message(self.message)
 
             async def _alldebrid_progress(snapshot):
-                nonlocal last_progress_text
+                # The poll snapshots carry the magnet's own ``id``; stash it so
+                # a cancel during resolve can still delete the magnet (normally
+                # only set after resolve completes).
+                magnet_id = snapshot.get("id")
+                if magnet_id:
+                    try:
+                        self._alldebrid_magnet_id = int(magnet_id)
+                    except (TypeError, ValueError):
+                        pass
+                alldebrid_status.update(snapshot)
                 try:
-                    text = format_magnet_progress(snapshot)
+                    # force=False -> reuse update_status_message's built-in 3s
+                    # throttle, so a fast unlock burst (many files) can't flood
+                    # Telegram with delete+resend cycles.
+                    await update_status_message(self.message.chat.id)
                 except Exception:
-                    return
-                if text == last_progress_text:
-                    return
-                if await edit_message(progress_msg, text):
-                    last_progress_text = text
+                    pass
 
             try:
                 if is_magnet(self.link):
@@ -423,18 +440,42 @@ class Mirror(TaskListener):
             except DirectDownloadLinkException as e:
                 msg = str(e)
                 LOGGER.info(msg)
-                await delete_message(progress_msg)
+                if self.is_cancelled:
+                    # Canonical cancel path (same as DirectListener.cancel_task)
+                    # so the AllDebrid magnet is deleted, the queue/dir cleaned
+                    # and the status message torn down. on_download_error also
+                    # calls remove_from_same_dir() internally.
+                    await self.on_download_error("Download Cancelled by User!")
+                    return
+                await self.remove_from_same_dir()
+                async with task_dict_lock:
+                    if self.mid in task_dict:
+                        del task_dict[self.mid]
+                await update_status_message(self.message.chat.id)
                 if msg.startswith("ERROR:"):
                     await send_message(self.message, msg)
-                    await self.remove_from_same_dir()
-                    return
-                resolved = None
-            except Exception as e:
-                await delete_message(progress_msg)
-                await send_message(self.message, e)
-                await self.remove_from_same_dir()
                 return
-            await delete_message(progress_msg)
+            except Exception as e:
+                if self.is_cancelled:
+                    await self.on_download_error("Download Cancelled by User!")
+                    return
+                await self.remove_from_same_dir()
+                async with task_dict_lock:
+                    if self.mid in task_dict:
+                        del task_dict[self.mid]
+                await update_status_message(self.message.chat.id)
+                await send_message(self.message, e)
+                return
+
+            if self.is_cancelled:
+                await self.on_download_error("Download Cancelled by User!")
+                return
+
+            # Resolve done. Keep AllDebridStatus registered under this mid so
+            # the status message never hits an empty render (which would delete
+            # it): the dispatcher below immediately overwrites the very same
+            # mid with DirectStatus/QueueStatus, morphing the SAME message from
+            # "AllDebrid: Ready" into "Download: <name>" with no new message.
             if isinstance(resolved, dict):
                 self._alldebrid_magnet_id = resolved.get("magnet_id", 0)
                 self.link = resolved
