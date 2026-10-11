@@ -11,6 +11,7 @@ from ..helper.ext_utils.bot_utils import (
     get_content_type,
     sync_to_async,
     arg_parser,
+    find_unknown_flags,
     COMMAND_USAGE,
 )
 from ..helper.ext_utils.exceptions import DirectDownloadLinkException
@@ -149,6 +150,29 @@ class Mirror(TaskListener):
         }
 
         arg_parser(input_list[1:], args)
+
+        unknown_flags = find_unknown_flags(input_list[1:], args)
+        if unknown_flags:
+            _typo_hint = {
+                "-gd": "-up gd",
+                "-gf": "-up gf",
+                "-rc": "-up rc",
+            }
+            _lines = []
+            for _f in unknown_flags:
+                if _f in _typo_hint:
+                    _lines.append(f"• `{_f}` → maksud kau `{_typo_hint[_f]}`?")
+                else:
+                    _lines.append(f"• `{_f}` tak dikenali")
+            _warn = (
+                "⚠️ Flag tak dikenali:\n"
+                + "\n".join(_lines)
+                + "\n\nTarget upload guna `-up gd` (GDrive) / `-up rc` (rclone) / `-up gf` (Gofile)."
+                + "\nTask tak dijalankan — hantar semula."
+            )
+            await send_message(self.message, _warn)
+            await self.remove_from_same_dir()
+            return
 
         self.select = args["-s"]
         self.seed = args["-d"]

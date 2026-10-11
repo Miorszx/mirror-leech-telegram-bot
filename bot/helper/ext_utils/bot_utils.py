@@ -1,6 +1,7 @@
 from httpx import AsyncClient
 from asyncio.subprocess import PIPE
 from functools import partial, wraps
+from re import fullmatch
 from concurrent.futures import ThreadPoolExecutor
 from asyncio import (
     create_subprocess_exec,
@@ -198,6 +199,73 @@ def arg_parser(items, arg_base):
         link_items = items[:arg_start] if arg_start != -1 else items
         if link_items:
             arg_base["link"] = " ".join(link_items)
+
+
+# Valueless switches for the sub-list builder. Mirrors the local `bool_arg_set`
+# inside `arg_parser` so `find_unknown_flags` agrees with what the parser
+# actually consumes (and never mistakes a real value for an orphan flag).
+_BOOL_ARGS = frozenset(
+    {
+        "-b",
+        "-e",
+        "-z",
+        "-s",
+        "-j",
+        "-d",
+        "-sv",
+        "-ss",
+        "-f",
+        "-fd",
+        "-fu",
+        "-sync",
+        "-hl",
+        "-doc",
+        "-med",
+        "-ut",
+        "-bt",
+        "-ad",
+        "-tb",
+    }
+)
+
+# A short single-dash lowercase token, e.g. `-gd`, `-up`, `-ad`. Deliberately
+# narrow: excludes `--long`, negative numbers and ids, so URLs / rclone flags
+# passed as values are never misread as typos.
+_FLAG_TOKEN = r"-[a-z]{1,4}"
+
+
+def find_unknown_flags(items, arg_base):
+    """Return option tokens that look like flags but are NOT known keys.
+
+    The parser folds unrecognised ``-xx`` tokens into ``link`` (or drops them),
+    so a typo such as ``-gd`` silently falls back to DEFAULT_UPLOAD instead of
+    erroring. This replays the parser's own value-consumption so genuine values
+    (``-up gd`` -> ``gd``, ``-rcf --buffer-size:8M`` -> the long flag) are never
+    reported; only a genuinely orphan ``-word`` token is returned.
+    """
+    if not items:
+        return []
+    known = set(arg_base)
+    unknown = []
+    i = 0
+    total = len(items)
+    while i < total:
+        tok = items[i]
+        if tok in known:
+            if tok in _BOOL_ARGS:
+                i += 1
+                continue
+            # Value-taking key: swallow the tokens that follow it as its value,
+            # exactly as arg_parser does when it builds its sub-list.
+            j = i + 1
+            while j < total and items[j] not in known:
+                j += 1
+            i = j
+            continue
+        if fullmatch(_FLAG_TOKEN, tok):
+            unknown.append(tok)
+        i += 1
+    return unknown
 
 
 def get_size_bytes(size):
