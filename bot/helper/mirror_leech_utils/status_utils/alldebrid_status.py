@@ -74,19 +74,35 @@ class AllDebridStatus:
         else:
             self._has_seeders = False
 
-        speed = snapshot.get("downloadSpeed")
-        if speed is None:
-            elapsed = now - self._last_time
-            # Only derive a delta speed over a meaningful window; a burst of
-            # snapshots arriving <1s apart would divide by a near-zero dt and
-            # print an absurd TB/s figure.
-            if elapsed >= 1.0 and downloaded >= self._last_downloaded:
-                self._speed = (downloaded - self._last_downloaded) / elapsed
-        else:
+        # AllDebrid reports ``downloadSpeed`` in bytes/s, but it routinely
+        # returns a literal 0 on a live swarm poll (sampling gap / throttled
+        # sample) while ``downloaded`` keeps climbing. Trusting that 0 blinds
+        # both the Speed and ETA lines, so: prefer the reported figure, but
+        # when it is absent OR zero fall back to the measured byte delta over
+        # the poll window. A genuinely stalled swarm still shows 0 because
+        # then there is no byte delta either.
+        reported = None
+        raw_speed = snapshot.get("downloadSpeed")
+        if raw_speed is not None:
             try:
-                self._speed = float(speed)
+                reported = float(raw_speed)
             except (TypeError, ValueError):
-                self._speed = 0
+                reported = None
+
+        elapsed = now - self._last_time
+        # Only derive a delta speed over a meaningful window; a burst of
+        # snapshots arriving <1s apart would divide by a near-zero dt and
+        # print an absurd TB/s figure.
+        measured = None
+        if elapsed >= 1.0 and downloaded >= self._last_downloaded:
+            measured = (downloaded - self._last_downloaded) / elapsed
+
+        if reported:
+            self._speed = reported
+        elif measured is not None:
+            self._speed = measured
+        else:
+            self._speed = 0
 
         self._downloaded = downloaded
         self._last_downloaded = downloaded
