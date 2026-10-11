@@ -2,6 +2,8 @@ from logging import getLogger
 from time import time
 from os import path as ospath, walk
 import traceback
+from html import unescape
+from re import sub
 from aiofiles.os import path as aiopath
 from aiofiles import open as aiopen
 from asyncio import CancelledError
@@ -16,6 +18,28 @@ LOGGER = getLogger(__name__)
 _UPLOAD_BASE = "https://w.buzzheavier.com"
 
 _HTTP_TIMEOUT = Timeout(connect=30.0, read=600.0, write=600.0, pool=30.0)
+
+
+def _sanitize_remote_name(name):
+    """Return a name BuzzHeavier's API will accept.
+
+    The remote name is passed in the request URL; the API rejects the whole
+    request with a bare 400 "the Name field is invalid" (and, because the URL
+    is used verbatim, a raw reset) when the name carries ';', '%', or an '&'
+    glued to a letter — which is exactly what a stray HTML entity such as
+    '&ndash;' (common in tracker/repack magnet titles) produces. Decode entities
+    to their real characters first, then remove only the offending residues so
+    a legitimate 'Rock & Roll' keeps its ampersand. The local path is left
+    untouched; only the remote-facing name changes."""
+    original = name
+    name = unescape(name or "")
+    name = sub(r"&(?=[A-Za-z#])", "", name)
+    name = name.replace(";", "").replace("%", "")
+    name = " ".join(name.split()).strip().strip(".")
+    name = name or "file"
+    if name != original:
+        LOGGER.info(f"BuzzHeavier remote name sanitised: {original!r} -> {name!r}")
+    return name
 
 
 class BuzzHeavierUploader:
@@ -108,6 +132,7 @@ class BuzzHeavierUploader:
         return root_id
 
     async def _create_directory(self, name, parent_id):
+        name = _sanitize_remote_name(name)
         if not parent_id:
             parent_id = await self._get_root_id()
 
@@ -132,7 +157,7 @@ class BuzzHeavierUploader:
         return (data.get("data") or {}).get("id")
 
     async def _upload_file(self, file_path, parent_id):
-        file_name = ospath.basename(file_path)
+        file_name = _sanitize_remote_name(ospath.basename(file_path))
         file_size = await aiopath.getsize(file_path)
         chunk_size = self._get_chunk_size(file_size)
         if parent_id:
