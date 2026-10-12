@@ -77,12 +77,16 @@ async def main():
     from .core.jdownloader_booter import jdownloader
     from .helper.ext_utils.telegraph_helper import telegraph
     from .helper.mirror_leech_utils.rclone_utils.serve import rclone_serve_booter
+    from .helper.mirror_leech_utils.download_utils.alldebrid_cleanup import (
+        init_retention_sweep,
+    )
     from .modules import (
         initiate_search_tools,
         get_packages_version,
         restart_notification,
     )
 
+    init_retention_sweep()
     await gather(
         save_settings(),
         jdownloader.boot(),

@@ -360,6 +360,17 @@ class TaskListener(TaskConfig):
             await database.rm_complete_task(self.message.link)
         msg = f"<b>Name: </b><code>{escape(self.name)}</code>\n\n<b>Size: </b>{get_readable_file_size(self.size)}"
         LOGGER.info(f"Task Done: {self.name}")
+        # Task finished (upload complete) -> the AllDebrid magnet that fed
+        # this task is no longer needed. Release it in the background so the
+        # account history does not grow without bound.
+        try:
+            from ..mirror_leech_utils.download_utils.alldebrid_cleanup import (
+                schedule_cleanup_after_task,
+            )
+
+            schedule_cleanup_after_task(self)
+        except Exception as e:
+            LOGGER.warning(f"AllDebrid post-task cleanup skipped: {e}")
         if self.is_leech:
             msg += f"\n<b>Total Files: </b>{folders}"
             if mime_type != 0:

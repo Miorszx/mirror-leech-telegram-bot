@@ -638,6 +638,26 @@ async def get_magnet_status(magnet_id: int) -> dict[str, Any]:
     )
 
 
+async def list_magnets() -> list[dict[str, Any]]:
+    """Return every magnet still stored in the AllDebrid account history.
+
+    ``/magnet/status`` with no ``id`` returns the whole list. AllDebrid
+    returns a list when the account holds several magnets but collapses it
+    to a bare dict when exactly one magnet is present, so both shapes are
+    normalised to a list here. An account with an empty history yields an
+    empty ``magnets`` field (or omits it) - treated as "nothing to do".
+    """
+    data = await _post_form(f"{_API_BASE}/magnet/status", [])
+    magnets = data.get("magnets")
+    if not magnets:
+        return []
+    if isinstance(magnets, dict):
+        return [magnets]
+    if isinstance(magnets, list):
+        return magnets
+    return []
+
+
 async def delete_magnet(magnet_id: int) -> bool:
     """Best-effort, idempotent: delete a magnet from the AllDebrid history.
 
