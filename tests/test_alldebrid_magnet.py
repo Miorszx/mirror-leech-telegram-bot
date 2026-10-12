@@ -122,10 +122,49 @@ def test_flatten_files_recursive(alldebrid_module):
         {"n": "c.mkv", "s": 300, "l": "https://alldebrid.com/f/C"},
     ]
     out = alldebrid_module._flatten_files(nodes)
+    filenames = [item["filename"] for item in out]
+    assert filenames == ["a.mkv", "b.mkv", "c.mkv"]
+    # ``path`` is the containing folder only - never the file itself.
+    # DirectListener uses it as aria2's ``dir`` and ``filename`` as ``out``,
+    # so a path that included the filename would nest each file inside a
+    # directory named after itself.
     paths = [item["path"] for item in out]
-    assert paths == ["Folder/a.mkv", "Folder/Inner/b.mkv", "c.mkv"]
+    assert paths == ["Folder", "Folder/Inner", ""]
     sizes = [item["size"] for item in out]
     assert sizes == [100, 200, 300]
+
+
+def test_flatten_files_drops_lone_dir_wrapper(alldebrid_module):
+    # AllDebrid wraps a multi-file magnet as a single DIR named after the
+    # torrent; add_direct_download already appends that same name, so the
+    # wrapper is dropped to avoid "<name>/<name>/...".
+    nodes = [
+        {
+            "n": "MyShow",
+            "e": [
+                {"n": "ep1.mkv", "s": 10, "l": "https://alldebrid.com/f/1"},
+                {
+                    "n": "S01",
+                    "e": [
+                        {"n": "ep2.mkv", "s": 20, "l": "https://alldebrid.com/f/2"},
+                    ],
+                },
+            ],
+        }
+    ]
+    out = alldebrid_module._flatten_files(nodes)
+    assert [i["path"] for i in out] == ["", "S01"]
+    assert [i["filename"] for i in out] == ["ep1.mkv", "ep2.mkv"]
+
+
+def test_flatten_files_lone_file_wrapper(alldebrid_module):
+    # A single-file magnet arrives as one top-level FILE node: flattening
+    # must yield path == "" and the basename as filename.
+    nodes = [{"n": "movie.mkv", "s": 500, "l": "https://alldebrid.com/f/M"}]
+    out = alldebrid_module._flatten_files(nodes)
+    assert len(out) == 1
+    assert out[0]["path"] == ""
+    assert out[0]["filename"] == "movie.mkv"
 
 
 @pytest.mark.asyncio
@@ -144,8 +183,8 @@ async def test_resolve_magnet_full_flow(alldebrid_module, monkeypatch):
 
     async def fake_get_files(magnet_id):
         return [
-            {"filename": "a.mkv", "path": "a.mkv", "size": 100, "link": "/f/A"},
-            {"filename": "b.mkv", "path": "b.mkv", "size": 200, "link": "/f/B"},
+            {"filename": "a.mkv", "path": "", "size": 100, "link": "/f/A"},
+            {"filename": "b.mkv", "path": "", "size": 200, "link": "/f/B"},
         ]
 
     async def fake_unlock(link):

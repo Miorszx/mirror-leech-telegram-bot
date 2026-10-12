@@ -399,7 +399,7 @@ async def alldebrid_resolve(link: str) -> str | dict[str, Any]:
                 contents.append(
                     {
                         "filename": entry.get("filename") or filename,
-                        "path": entry.get("filename") or filename,
+                        "path": "",
                         "url": stream_url,
                         "size": int(entry.get("filesize") or 0),
                         "headers": {},
@@ -500,9 +500,29 @@ def _flatten_files(
     Folder nodes carry an ``e`` key with the children. File nodes carry
     ``n`` (name), ``s`` (size in bytes) and ``l`` (the AllDebrid ``/f/``
     link that still needs unlocking).
+
+    ``path`` is the *folder* (relative to the download root) that holds
+    the file — never the file itself. ``DirectListener`` joins it as
+    ``dir = f"{self._path}/{content['path']}"`` and uses ``filename`` as
+    aria2's ``out``; if ``path`` already contained the filename the file
+    would land inside a directory named after itself.
+
+    AllDebrid wraps every magnet as a single top-level node named after
+    the torrent — a ``DIR`` for multi-file torrents, a ``FILE`` for
+    single-file ones. ``add_direct_download`` already appends
+    ``listener.name`` (the same torrent name) to the download path, so
+    the lone ``DIR`` wrapper is dropped to avoid a duplicated directory
+    level (``<name>/<name>/...``). A lone ``FILE`` wrapper needs no
+    special handling — it flattens to ``path == ""``.
     """
     if result is None:
         result = []
+        if (
+            len(nodes) == 1
+            and isinstance(nodes[0], dict)
+            and isinstance(nodes[0].get("e"), list)
+        ):
+            nodes = nodes[0]["e"]
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -515,7 +535,7 @@ def _flatten_files(
             result.append(
                 {
                     "filename": filename,
-                    "path": f"{prefix}{filename}",
+                    "path": prefix.rstrip("/"),
                     "size": int(node.get("s", 0) or 0),
                     "link": node.get("l", ""),
                 }
@@ -725,7 +745,7 @@ async def _resolve_unlocked_files(
                 "filename": unlocked.get("filename")
                 or file_entry.get("filename")
                 or "file",
-                "path": file_entry.get("path") or unlocked.get("filename") or "file",
+                "path": file_entry.get("path") or "",
                 "url": direct,
                 "size": int(unlocked.get("filesize") or file_entry.get("size") or 0),
                 "headers": {},
