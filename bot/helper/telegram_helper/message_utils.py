@@ -266,11 +266,21 @@ async def send_status_message(msg, user_id=0):
                     del intervals["status"][sid]
                 return
             old_message = status_dict[sid]["message"]
-            # A live status message already exists for this chat: refresh it in
-            # place. Deleting and resending here is what made a second status
-            # call (e.g. the resolve -> download hand-off, or adding a task)
-            # blink the message away and pop a brand new one.
-            if text != old_message.text:
+            # Two very different situations land here:
+            #   * the SAME task advancing a phase - e.g. the AllDebrid
+            #     resolve -> download hand-off: the status message should
+            #     evolve in place, so just EDIT it (delete+resend here made
+            #     the message blink away and pop back mid-task);
+            #   * a DIFFERENT task joining the chat while this one is still
+            #     live: the aggregated status has to be reposted as a fresh
+            #     message (upstream behaviour), otherwise a new task looks
+            #     like it merely overwrote the previous status instead of
+            #     starting its own.
+            # ``status_dict[sid]["owner"]`` records which task's command
+            # message last (re)created this status message, so the two cases
+            # can be told apart.
+            same_task = status_dict[sid].get("owner") == msg.id
+            if same_task and text != old_message.text:
                 refreshed = await edit_message(
                     old_message, None, buttons, block=False, rich_message=text
                 )
@@ -294,8 +304,22 @@ async def send_status_message(msg, user_id=0):
                         return
                 old_message.text = text
                 status_dict[sid].update({"message": old_message, "time": time()})
-            else:
+            elif same_task:
                 status_dict[sid]["time"] = time()
+            else:
+                # A different task joined the chat: repost the aggregated
+                # status as a brand-new message and drop the stale one.
+                message = await send_rich_message(msg, text, buttons, block=False)
+                if isinstance(message, str):
+                    LOGGER.error(
+                        f"Status with id: {sid} haven't been sent. Error: {message}"
+                    )
+                    return
+                await delete_message(old_message)
+                message.text = text
+                status_dict[sid].update(
+                    {"message": message, "time": time(), "owner": msg.id}
+                )
         else:
             text, buttons = await get_readable_message(sid, is_user)
             if text is None:
@@ -314,6 +338,7 @@ async def send_status_message(msg, user_id=0):
                 "page_step": 1,
                 "status": "All",
                 "is_user": is_user,
+                "owner": msg.id,
             }
         if not intervals["status"].get(sid) and not is_user:
             intervals["status"][sid] = SetInterval(
