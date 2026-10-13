@@ -21,7 +21,21 @@ async def add_direct_download(listener, path):
 
     if not listener.name:
         listener.name = details["title"]
-    path = f"{path}/{listener.name}"
+    # A lone file whose name is identical to the wrapper folder would land
+    # inside a directory named after itself (``<name>/<name>``). qBittorrent
+    # and aria2 never create such a directory for a single-file torrent, so
+    # skip the wrapper then and let the file sit directly under the download
+    # root. Everything else keeps the wrapper: multi-file payloads, files
+    # carrying a real folder part, and a collection whose torrent name
+    # differs from its single inner file (e.g. a one-file torrent, which
+    # still belongs in the torrent-named folder).
+    self_nesting = (
+        len(contents) == 1
+        and not contents[0].get("path")
+        and contents[0].get("filename") == listener.name
+    )
+    if not self_nesting:
+        path = f"{path}/{listener.name}"
 
     msg, button = await stop_duplicate_check(listener)
     if msg:

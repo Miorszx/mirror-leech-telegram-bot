@@ -167,6 +167,267 @@ def test_flatten_files_lone_file_wrapper(alldebrid_module):
     assert out[0]["filename"] == "movie.mkv"
 
 
+def _load_direct_downloader(monkeypatch):
+    """Import ``direct_downloader`` with its heavy deps stubbed so the real
+    ``add_direct_download`` wrapper runs (mirrors ``alldebrid_module``)."""
+    project_root = Path(__file__).resolve().parent.parent
+
+    bot_pkg = ModuleType("bot")
+    bot_pkg.__path__ = []
+
+    class _Logger:
+        @staticmethod
+        def info(msg):
+            pass
+
+        @staticmethod
+        def error(msg):
+            pass
+
+    class _AsyncNullContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    bot_pkg.LOGGER = _Logger()
+    bot_pkg.task_dict = {}
+    bot_pkg.task_dict_lock = _AsyncNullContext()
+
+    for name, path in (
+        ("bot", bot_pkg),
+        ("bot.helper", ModuleType("bot.helper")),
+        ("bot.helper.ext_utils", ModuleType("bot.helper.ext_utils")),
+        ("bot.helper.telegram_helper", ModuleType("bot.helper.telegram_helper")),
+        ("bot.helper.listeners", ModuleType("bot.helper.listeners")),
+        (
+            "bot.helper.mirror_leech_utils",
+            ModuleType("bot.helper.mirror_leech_utils"),
+        ),
+        (
+            "bot.helper.mirror_leech_utils.status_utils",
+            ModuleType("bot.helper.mirror_leech_utils.status_utils"),
+        ),
+    ):
+        path.__path__ = (
+            [
+                str(
+                    project_root
+                    / "bot"
+                    / "helper"
+                    / "mirror_leech_utils"
+                    / "download_utils"
+                )
+            ]
+            if name == "bot.helper.mirror_leech_utils"
+            else []
+        )
+        monkeypatch.setitem(sys.modules, name, path)
+
+    task_manager = ModuleType("bot.helper.ext_utils.task_manager")
+
+    async def _no_running_tasks(*a, **k):
+        return False, None
+
+    async def _no_duplicate(*a, **k):
+        return None, None
+
+    task_manager.check_running_tasks = _no_running_tasks
+    task_manager.stop_duplicate_check = _no_duplicate
+    monkeypatch.setitem(
+        sys.modules, "bot.helper.ext_utils.task_manager", task_manager
+    )
+
+    queue_status = ModuleType(
+        "bot.helper.mirror_leech_utils.status_utils.queue_status"
+    )
+    queue_status.QueueStatus = type("QueueStatus", (), {"__init__": lambda s, *a: None})
+    monkeypatch.setitem(
+        sys.modules,
+        "bot.helper.mirror_leech_utils.status_utils.queue_status",
+        queue_status,
+    )
+
+    direct_status = ModuleType(
+        "bot.helper.mirror_leech_utils.status_utils.direct_status"
+    )
+    direct_status.DirectStatus = type("DirectStatus", (), {"__init__": lambda s, *a: None})
+    monkeypatch.setitem(
+        sys.modules,
+        "bot.helper.mirror_leech_utils.status_utils.direct_status",
+        direct_status,
+    )
+
+    message_utils = ModuleType("bot.helper.telegram_helper.message_utils")
+
+    async def _no_status_message(*a, **k):
+        return None
+
+    message_utils.send_status_message = _no_status_message
+    monkeypatch.setitem(
+        sys.modules, "bot.helper.telegram_helper.message_utils", message_utils
+    )
+
+    direct_listener = ModuleType("bot.helper.listeners.direct_listener")
+    captured = {}
+
+    class _DL:
+        def __init__(self, path, listener, a2c_opt):
+            captured["path"] = path
+
+        async def download(self, contents):
+            captured["contents"] = contents
+
+    direct_listener.DirectListener = _DL
+    monkeypatch.setitem(
+        sys.modules, "bot.helper.listeners.direct_listener", direct_listener
+    )
+
+    download_utils_pkg = ModuleType(
+        "bot.helper.mirror_leech_utils.download_utils"
+    )
+    download_utils_pkg.__path__ = [
+        str(
+            project_root
+            / "bot"
+            / "helper"
+            / "mirror_leech_utils"
+            / "download_utils"
+        )
+    ]
+    monkeypatch.setitem(
+        sys.modules,
+        "bot.helper.mirror_leech_utils.download_utils",
+        download_utils_pkg,
+    )
+    sys.modules.pop(
+        "bot.helper.mirror_leech_utils.download_utils.direct_downloader", None
+    )
+    module = importlib.import_module(
+        "bot.helper.mirror_leech_utils.download_utils.direct_downloader"
+    )
+    return module, captured
+
+
+class _FakeListener:
+    def __init__(self, link):
+        self.link = link
+        self.name = None
+        self.mid = "0"
+        self.size = 0
+        self.multi = 0
+        self.is_rss = False
+        self.is_cancelled = False
+        self.message = None
+
+    async def on_download_error(self, *a, **k):
+        pass
+
+    async def on_download_start(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_single_file_payload_has_no_wrapper_folder(monkeypatch):
+    # A lone file whose name equals the payload title would self-nest as
+    # ``<name>/<name>`` - add_direct_download must skip the wrapper and let
+    # it sit directly at ``<root>/<name>`` (a file, not a folder), matching
+    # a single-file torrent.
+    module, captured = _load_direct_downloader(monkeypatch)
+    listener = _FakeListener(
+        {
+            "contents": [
+                {
+                    "filename": "movie.mkv",
+                    "path": "",
+                    "size": 10,
+                    "url": "https://cdn/movie.mkv",
+                }
+            ],
+            "title": "movie.mkv",
+            "total_size": 10,
+        }
+    )
+    await module.add_direct_download(listener, "/root/123")
+    assert captured["path"] == "/root/123"
+
+
+@pytest.mark.asyncio
+async def test_multi_file_payload_keeps_wrapper_folder(monkeypatch):
+    # A multi-file payload keeps the torrent-name wrapper folder.
+    module, captured = _load_direct_downloader(monkeypatch)
+    listener = _FakeListener(
+        {
+            "contents": [
+                {
+                    "filename": "ep1.mkv",
+                    "path": "",
+                    "size": 10,
+                    "url": "https://cdn/ep1.mkv",
+                },
+                {
+                    "filename": "ep2.mkv",
+                    "path": "S01",
+                    "size": 20,
+                    "url": "https://cdn/ep2.mkv",
+                },
+            ],
+            "title": "MyShow",
+            "total_size": 30,
+        }
+    )
+    await module.add_direct_download(listener, "/root/123")
+    assert captured["path"] == "/root/123/MyShow"
+
+
+@pytest.mark.asyncio
+async def test_one_file_collection_keeps_wrapper_when_name_differs(monkeypatch):
+    # A one-file payload whose inner filename differs from the torrent name
+    # does NOT self-nest; keep the wrapper so the torrent-named folder is
+    # preserved (e.g. a one-file torrent still belongs in its own folder).
+    module, captured = _load_direct_downloader(monkeypatch)
+    listener = _FakeListener(
+        {
+            "contents": [
+                {
+                    "filename": "ep1.mkv",
+                    "path": "",
+                    "size": 10,
+                    "url": "https://cdn/ep1.mkv",
+                }
+            ],
+            "title": "MyShow",
+            "total_size": 10,
+        }
+    )
+    await module.add_direct_download(listener, "/root/123")
+    assert captured["path"] == "/root/123/MyShow"
+
+
+@pytest.mark.asyncio
+async def test_single_file_inside_folder_still_gets_wrapper(monkeypatch):
+    # One content but carrying a folder part is not a bare single file;
+    # keep the wrapper so the folder structure is preserved.
+    module, captured = _load_direct_downloader(monkeypatch)
+    listener = _FakeListener(
+        {
+            "contents": [
+                {
+                    "filename": "ep1.mkv",
+                    "path": "S01",
+                    "size": 10,
+                    "url": "https://cdn/ep1.mkv",
+                }
+            ],
+            "title": "MyShow",
+            "total_size": 10,
+        }
+    )
+    await module.add_direct_download(listener, "/root/123")
+    assert captured["path"] == "/root/123/MyShow"
+
+
 @pytest.mark.asyncio
 async def test_resolve_magnet_full_flow(alldebrid_module, monkeypatch):
     state = {"poll_calls": 0}

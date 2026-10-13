@@ -509,11 +509,13 @@ def _flatten_files(
 
     AllDebrid wraps every magnet as a single top-level node named after
     the torrent — a ``DIR`` for multi-file torrents, a ``FILE`` for
-    single-file ones. ``add_direct_download`` already appends
-    ``listener.name`` (the same torrent name) to the download path, so
-    the lone ``DIR`` wrapper is dropped to avoid a duplicated directory
-    level (``<name>/<name>/...``). A lone ``FILE`` wrapper needs no
-    special handling — it flattens to ``path == ""``.
+    single-file ones. For multi-file payloads ``add_direct_download``
+    appends ``listener.name`` (the same torrent name) to the download
+    path, so the lone ``DIR`` wrapper is dropped to avoid a duplicated
+    directory level (``<name>/<name>/...``). A lone ``FILE`` wrapper
+    needs no special handling — it flattens to ``path == ""`` and lands
+    directly at ``<root>/<filename>`` (no wrapper folder), matching how
+    qBittorrent/aria2 place a single-file torrent.
     """
     if result is None:
         result = []
