@@ -61,12 +61,36 @@ from ..helper.mirror_leech_utils.download_utils.rclone_download import (
 from ..helper.mirror_leech_utils.download_utils.telegram_download import (
     TelegramDownloadHelper,
 )
+from ..helper.ext_utils.files_utils import clean_target
 from ..helper.telegram_helper.message_utils import (
     send_message,
     send_status_message,
     update_status_message,
     get_tg_link_message,
 )
+
+
+async def _clean_local_torrent(link):
+    """Remove a ``.torrent`` we materialised under DOWNLOAD_DIR.
+
+    A Telegram reply-download drops the .torrent in the download dir and
+    nothing else ever removes it, so a plain file reply leaves a stray
+    leftover behind after the task finishes. By the time we call this the
+    bytes are already in memory, so the file is dead weight. Only files that
+    actually live inside DOWNLOAD_DIR are removed - a path the user typed
+    themselves is left untouched.
+    """
+    if not (isinstance(link, str) and link.endswith(".torrent")):
+        return
+    try:
+        real = ospath.realpath(link)
+        root = ospath.realpath(DOWNLOAD_DIR)
+        if (real == root or real.startswith(root.rstrip("/") + "/")) and await aiopath.exists(
+            link
+        ):
+            await clean_target(link)
+    except Exception as e:
+        LOGGER.error(f"Could not clean torrent file {link}: {e}")
 
 
 class Mirror(TaskListener):
@@ -390,6 +414,8 @@ class Mirror(TaskListener):
                         is_cancelled=lambda: self.is_cancelled,
                     )
                     self._torbox_torrent_id = resolved.get("torbox_torrent_id", 0)
+                    # drop the local .torrent before self.link becomes a dict
+                    await _clean_local_torrent(self.link)
                     self.link = resolved
 
             except DirectDownloadLinkException as e:
@@ -461,6 +487,10 @@ class Mirror(TaskListener):
                         is_cancelled=lambda: self.is_cancelled,
                         progress_callback=_alldebrid_progress,
                     )
+                    # .torrent bytes are in memory now; drop the local copy so
+                    # a file reply doesn't leave a stray leftover in the
+                    # download dir. Only inside DOWNLOAD_DIR is touched.
+                    await _clean_local_torrent(self.link)
             except DirectDownloadLinkException as e:
                 msg = str(e)
                 LOGGER.info(msg)
