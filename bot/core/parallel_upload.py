@@ -109,10 +109,11 @@ async def _parallel_save_file(
             file_id = file_id or self.rnd_id()
 
             if not is_big:
-                # Small files: single part, keep it simple + compute md5.
+                # Small files: one connection, but still chunked at PART_SIZE
+                # because Telegram rejects any part above 512 KiB.
                 return await _upload_small(
                     self, fd, file_id, file_size, file_total_parts, file_name,
-                    is_missing_part, progress, progress_args,
+                    is_missing_part, progress, progress_args, file_part,
                 )
 
             workers_count = _env_int("MLTB_UPLOAD_WORKERS", 8)
@@ -204,26 +205,44 @@ async def _parallel_save_file(
 
 async def _upload_small(
     self, fd, file_id, file_size, file_total_parts, file_name,
-    is_missing_part, progress, progress_args,
+    is_missing_part, progress, progress_args, file_part=0,
 ):
     dc_id = await self.storage.dc_id()
     session = await self.get_session(dc_id, is_media=True)
-    data = os.pread(fd, file_size, 0)
-    if not is_missing_part:
-        await session.invoke(
-            raw.functions.upload.SaveFilePart(file_id=file_id, file_part=0, bytes=data)
-        )
-    if progress:
-        func = functools.partial(progress, file_size, file_size, *progress_args)
-        if inspect.iscoroutinefunction(progress):
-            await func()
-        else:
-            await self.loop.run_in_executor(self.executor, func)
+    # Telegram caps every part at 512 KiB (FILE_PART_TOO_BIG above that), so the
+    # whole payload can never ride a single SaveFilePart — chunk it exactly like
+    # the big-file path, just on one connection.
+    md5_sum = md5()
+    part = file_part
+    while True:
+        chunk = os.pread(fd, PART_SIZE, part * PART_SIZE)
+        if not chunk:
+            break
+        if not is_missing_part:
+            await session.invoke(
+                raw.functions.upload.SaveFilePart(
+                    file_id=file_id, file_part=part, bytes=chunk
+                )
+            )
+            md5_sum.update(chunk)
+        part += 1
+        if is_missing_part:
+            break
+        if progress:
+            func = functools.partial(
+                progress, min(part * PART_SIZE, file_size), file_size, *progress_args
+            )
+            if inspect.iscoroutinefunction(progress):
+                await func()
+            else:
+                await self.loop.run_in_executor(self.executor, func)
     if is_missing_part:
         return None
-    md5_sum = "".join(f"{b:02x}" for b in md5(data).digest())
     return raw.types.InputFile(
-        id=file_id, parts=file_total_parts, name=file_name, md5_checksum=md5_sum
+        id=file_id,
+        parts=file_total_parts,
+        name=file_name,
+        md5_checksum="".join(f"{b:02x}" for b in md5_sum.digest()),
     )
 
 
