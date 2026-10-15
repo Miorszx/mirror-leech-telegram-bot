@@ -24,6 +24,8 @@ docker cp "${REPO}/bot/core/config_manager.py" "${CT}:/app/bot/core/config_manag
 docker cp "${REPO}/bot/__main__.py" "${CT}:/app/bot/__main__.py"
 docker cp "${REPO}/bot/helper/listeners/task_listener.py" "${CT}:/app/bot/helper/listeners/task_listener.py"
 
+docker cp "${REPO}/bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py" "${CT}:/app/bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py"
+
 echo "[2/3] Restarting bot (this drops any in-flight download/upload)..."
 docker restart "${CT}"
 
