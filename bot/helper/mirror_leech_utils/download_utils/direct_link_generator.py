@@ -8,7 +8,7 @@ from re import findall, match, search
 from requests import Session, post, get
 from requests.adapters import HTTPAdapter
 from time import sleep, time
-from urllib.parse import parse_qs, urlparse, quote
+from urllib.parse import parse_qs, urlparse, quote, urljoin
 from urllib3.util.retry import Retry
 from uuid import uuid4
 from base64 import b64decode, b64encode
@@ -42,6 +42,8 @@ def direct_link_generator(link):
         return yandex_disk(link)
     elif "buzzheavier.com" in domain:
         return buzzheavier(link)
+    elif "0000456.xyz" in domain:
+        return cloud_index(link)
     elif "devuploads" in domain:
         return devuploads(link)
     elif "lulacloud.com" in domain:
@@ -314,6 +316,84 @@ def buzzheavier(url):
             return details
         else:
             raise DirectDownloadLinkException("ERROR: No download link found")
+
+
+def cloud_index(url):
+    """
+    Generate direct download link(s) for cdn.0000456.xyz (Kurumi Index) URLs.
+    The index page itself stores no file URL; the entry payload (a server
+    island fragment) exposes the underlying CDN, whose own download route
+    serves a direct file. A single-file entry returns one link; a collection
+    entry returns the full contents map.
+    @param url: URL from the index host
+    @return: Direct download link or contents dict
+    """
+    base = "https://cdn.0000456.xyz"
+    slug_match = search(r"/0/([A-Za-z0-9]+)", urlparse(url).path)
+    if not slug_match:
+        raise DirectDownloadLinkException("ERROR: Invalid index entry link")
+    slug = slug_match.group(1)
+
+    def clean(el):
+        return " ".join("".join(el.itertext()).split())
+
+    def direct(session, entry_id):
+        referer = f"{base}/0/{entry_id}"
+        res = session.get(
+            f"{base}/download/0/{entry_id}",
+            headers={"referer": referer},
+            allow_redirects=False,
+        )
+        location = res.headers.get("location") or ""
+        return location if "dl.0000456.xyz" in location else None
+
+    session = create_scraper()
+    entry = session.get(f"{base}/0/{slug}", timeout=30)
+    island_refs = findall(r'/_server-islands/StreamEntries\?[^"\'\s<>]+', entry.text)
+    if not island_refs:
+        raise DirectDownloadLinkException("ERROR: Entry payload not found")
+    island = session.get(
+        urljoin(base, island_refs[0].replace("&amp;", "&")), timeout=30
+    ).text
+
+    rows = HTML(island).xpath("//tr[.//a[contains(@href,'?t=d')]]")
+    title_match = findall(r'og:title"\s+content="([^"]*)"', entry.text)
+    title = title_match[0] if title_match else slug
+
+    if not rows:
+        link = direct(session, slug)
+        if not link:
+            raise DirectDownloadLinkException("ERROR: No download link found")
+        return link
+
+    details = {
+        "contents": [],
+        "title": title,
+        "total_size": 0,
+        "header": ["Referer: " + base + "/", "User-Agent: " + user_agent],
+    }
+    for row in rows:
+        try:
+            anchor = row.xpath(".//a[contains(@href,'?t=d')]")[0]
+            id_match = search(r"/0/([A-Za-z0-9]+)", anchor.attrib.get("href", ""))
+            if not id_match:
+                continue
+            filename = clean(anchor) or id_match.group(1)
+            size = row.xpath("./td/text()")
+            size = size[0].strip() if size else "0"
+            link = direct(session, id_match.group(1))
+            if not link:
+                continue
+            details["contents"].append(
+                {"path": "", "filename": filename, "url": link}
+            )
+            details["total_size"] += speed_string_to_bytes(size)
+        except Exception:
+            continue
+
+    if not details["contents"]:
+        raise DirectDownloadLinkException("ERROR: No download link found")
+    return details
 
 
 def fuckingfast_dl(url):
