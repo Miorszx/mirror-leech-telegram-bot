@@ -321,34 +321,38 @@ def buzzheavier(url):
 def cloud_index(url):
     """
     Generate direct download link(s) for cdn.0000456.xyz (Kurumi Index) URLs.
-    The index page itself stores no file URL; the entry payload (a server
-    island fragment) exposes the underlying CDN, whose own download route
-    serves a direct file. A single-file entry returns one link; a collection
-    entry returns the full contents map.
+    The host is a multi-provider index: each path prefix is a bucket whose
+    own download route resolves to a direct file on the CDN edge. An entry
+    that holds a single file returns one link; an entry that holds a list
+    of files returns the full contents map. Both the plain entry path and
+    the download route are accepted, so any link copied from the site works.
     @param url: URL from the index host
     @return: Direct download link or contents dict
     """
     base = "https://cdn.0000456.xyz"
-    slug_match = search(r"/0/([A-Za-z0-9]+)", urlparse(url).path)
-    if not slug_match:
-        raise DirectDownloadLinkException("ERROR: Invalid index entry link")
-    slug = slug_match.group(1)
+    entry_match = search(
+        r"^/(?:download/)?(\d+)/([A-Za-z0-9_-]+)", urlparse(url).path
+    )
+    if not entry_match:
+        raise DirectDownloadLinkException(
+            "ERROR: Send a file or folder link from the index, not a listing page"
+        )
+    bucket, slug = entry_match.group(1), entry_match.group(2)
 
     def clean(el):
         return " ".join("".join(el.itertext()).split())
 
-    def direct(session, entry_id):
-        referer = f"{base}/0/{entry_id}"
+    def direct(session, bucket_id, entry_id):
         res = session.get(
-            f"{base}/download/0/{entry_id}",
-            headers={"referer": referer},
+            f"{base}/download/{bucket_id}/{entry_id}",
+            headers={"referer": f"{base}/{bucket_id}/{entry_id}"},
             allow_redirects=False,
         )
         location = res.headers.get("location") or ""
         return location if "dl.0000456.xyz" in location else None
 
     session = create_scraper()
-    entry = session.get(f"{base}/0/{slug}", timeout=30)
+    entry = session.get(f"{base}/{bucket}/{slug}", timeout=30)
     island_refs = findall(r'/_server-islands/StreamEntries\?[^"\'\s<>]+', entry.text)
     if not island_refs:
         raise DirectDownloadLinkException("ERROR: Entry payload not found")
@@ -356,12 +360,12 @@ def cloud_index(url):
         urljoin(base, island_refs[0].replace("&amp;", "&")), timeout=30
     ).text
 
-    rows = HTML(island).xpath("//tr[.//a[contains(@href,'?t=d')]]")
+    rows = HTML(island).xpath("//tr[.//a[contains(@href,'?t=')]]")
     title_match = findall(r'og:title"\s+content="([^"]*)"', entry.text)
     title = title_match[0] if title_match else slug
 
     if not rows:
-        link = direct(session, slug)
+        link = direct(session, bucket, slug)
         if not link:
             raise DirectDownloadLinkException("ERROR: No download link found")
         return link
@@ -374,14 +378,17 @@ def cloud_index(url):
     }
     for row in rows:
         try:
-            anchor = row.xpath(".//a[contains(@href,'?t=d')]")[0]
-            id_match = search(r"/0/([A-Za-z0-9]+)", anchor.attrib.get("href", ""))
-            if not id_match:
+            anchor = row.xpath(".//a[contains(@href,'?t=')]")[0]
+            row_match = search(
+                r"^/(?:download/)?(\d+)/([A-Za-z0-9_-]+)",
+                anchor.attrib.get("href", ""),
+            )
+            if not row_match:
                 continue
-            filename = clean(anchor) or id_match.group(1)
+            filename = clean(anchor) or row_match.group(2)
             size = row.xpath("./td/text()")
             size = size[0].strip() if size else "0"
-            link = direct(session, id_match.group(1))
+            link = direct(session, row_match.group(1), row_match.group(2))
             if not link:
                 continue
             details["contents"].append(
