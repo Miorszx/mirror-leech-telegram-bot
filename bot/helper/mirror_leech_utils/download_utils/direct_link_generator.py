@@ -1578,7 +1578,9 @@ def gofile(url):
         try:
             __fetch_links(session, _id)
         except Exception as e:
-            raise DirectDownloadLinkException(e)
+            raise DirectDownloadLinkException(
+                f"ERROR: {e.__class__.__name__}: {e}"
+            )
 
     if len(details["contents"]) == 1:
         return (details["contents"][0]["url"], details["header"])
@@ -1643,7 +1645,7 @@ def mediafireFolder(url):
     try:
         __get_info(folderkey)
     except Exception as e:
-        raise DirectDownloadLinkException(e)
+        raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}: {e}")
 
     details["title"] = folder_infos[0]["name"]
 
@@ -1743,7 +1745,7 @@ def mediafireFolder(url):
         for folder in folder_infos:
             __get_content(folder["folderkey"], folder["name"])
     except Exception as e:
-        raise DirectDownloadLinkException(e)
+        raise DirectDownloadLinkException(f"ERROR: {e.__class__.__name__}: {e}")
     finally:
         session.close()
     if len(details["contents"]) == 1:
