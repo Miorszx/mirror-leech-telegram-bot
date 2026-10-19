@@ -60,6 +60,11 @@ class TgClient:
                 cls.IS_PREMIUM_USER = cls.user.me.is_premium
                 if cls.IS_PREMIUM_USER:
                     cls.MAX_SPLIT_SIZE = 4194304000
+                LOGGER.info(
+                    "User session started: is_premium=%s max_split_size=%s",
+                    cls.IS_PREMIUM_USER,
+                    cls.MAX_SPLIT_SIZE,
+                )
             except Exception as e:
                 LOGGER.error(f"Failed to start client from USER_SESSION_STRING. {e}")
                 cls.IS_PREMIUM_USER = False

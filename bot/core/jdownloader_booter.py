@@ -1,8 +1,10 @@
 from aiofiles.os import path, makedirs, listdir, rename
 from aioshutil import rmtree
+from asyncio import sleep as async_sleep
 from json import dump
 from random import randint
 from re import match
+from zipfile import BadZipFile, ZipFile
 
 from .. import LOGGER
 from ..helper.ext_utils.bot_utils import cmd_exec, new_task
@@ -19,6 +21,16 @@ class JDownloader(MyJdApi):
         self._device_name = ""
         self.is_connected = False
         self.error = "JDownloader Credentials not provided!"
+
+    @staticmethod
+    async def _jar_is_valid() -> bool:
+        """JDownloader.jar must be a readable zip; a truncated jar makes java
+        exit immediately, which previously caused an unthrottled reboot loop."""
+        try:
+            with ZipFile("/JDownloader/JDownloader.jar") as zf:
+                return zf.testzip() is None and bool(zf.namelist())
+        except (BadZipFile, OSError):
+            return False
 
     @new_task
     async def boot(self):
@@ -70,8 +82,8 @@ class JDownloader(MyJdApi):
         ) as rf:
             rf.truncate(0)
             dump(remote_data, rf)
-        if not await path.exists("/JDownloader/JDownloader.jar"):
-            pattern = r"JDownloader\.jar\.backup.\d$"
+        if not await path.exists("/JDownloader/JDownloader.jar") or not await self._jar_is_valid():
+            pattern = r"JDownloader\.jar\.backup\.\d$"
             for filename in await listdir("/JDownloader"):
                 if match(pattern, filename):
                     await rename(
@@ -85,6 +97,10 @@ class JDownloader(MyJdApi):
         _, __, code = await cmd_exec(cmd, shell=True)
         self.is_connected = False
         if code != -9:
+            LOGGER.warning(
+                "JDownloader exited unexpectedly (code=%s); retrying in 60s", code
+            )
+            await async_sleep(60)
             await self.boot()
 
 

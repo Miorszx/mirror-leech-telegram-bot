@@ -200,6 +200,14 @@ async def update_variables():
 
     Config.HYBRID_LEECH = bool(Config.HYBRID_LEECH and TgClient.IS_PREMIUM_USER)
 
+    LOGGER.info(
+        "Transmission config: user_transmission=%s hybrid_leech=%s "
+        "leech_split_size=%s threshold=2097152000",
+        Config.USER_TRANSMISSION,
+        Config.HYBRID_LEECH,
+        Config.LEECH_SPLIT_SIZE,
+    )
+
     if Config.AUTHORIZED_CHATS:
         aid = Config.AUTHORIZED_CHATS.split()
         for id_ in aid:
