@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from curl_cffi import requests as cffi_requests
 
 from ...ext_utils.exceptions import DirectDownloadLinkException
+from .shrinkme_resolver import is_shrinkme, resolve_shrinkme
 
 
 _OUO_DOMAINS = ("ouo.io", "ouo.press")
@@ -24,13 +25,17 @@ _CSRF_PATTERN = (
 
 
 def is_url_shortener(domain):
-    return any(d in domain for d in _OUO_DOMAINS) if domain else False
+    if not domain:
+        return False
+    return any(d in domain for d in _OUO_DOMAINS) or is_shrinkme(domain)
 
 
 def bypass_shortener(link):
     domain = urlparse(link).hostname or ""
     if any(d in domain for d in _OUO_DOMAINS):
         return _ouo(link)
+    if is_shrinkme(domain):
+        return resolve_shrinkme(link)
     raise DirectDownloadLinkException(f"ERROR: No bypasser for {domain}")
 
 
