@@ -8,7 +8,6 @@ from bot import LOGGER
 class Config:
     ALLDEBRID_API_KEY = ""
     ALLDEBRID_AUTO_DELETE = True
-    ANTICAPTCHA_KEY = ""
     TORBOX_API_KEY = ""
     AS_DOCUMENT = False
     AUTHORIZED_CHATS = ""
