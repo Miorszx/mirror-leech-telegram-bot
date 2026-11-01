@@ -2,5 +2,25 @@ services:
   app:
     build: .
     command: bash start.sh
-    restart: on-failure
-    network_mode: "host"
+    restart: unless-stopped
+    network_mode: "bridge"
+    # Chromium allocates shared memory per tab; the 64 MB container default
+    # makes it fall back to /tmp and stall on large pages. The resolver passes
+    # --disable-dev-shm-usage as a second guard, but a larger /dev/shm keeps
+    # parallel resolves from contending for the same spill file.
+    shm_size: "1gb"
+    environment:
+      # Opts the resolver in. Without it the module fails fast with a clear
+      # message instead of spawning a browser that is not installed.
+      - SHORTLINK_BROWSER=1
+      # start.sh starts Xvfb on this display; headful Chromium needs it
+      # because the Turnstile widget never mounts headless.
+      - DISPLAY=:99
+      # Not cosmetic. With TZ=UTC the Turnstile iframe mounts with a broken
+      # src ("https://undefined/...") and #invisibleCaptchaShortlink stays
+      # disabled until the budget runs out; set to a real IANA zone and the
+      # gate clears in ~3 s. Reproduced 3x on 2 slugs (Saleri, WulaN, Ninaaaa):
+      # UTC failed every time at ~47 s, Europe/London succeeded every time.
+      # Likely Cloudflare scoring the timezone/geo pair; the mechanism is not
+      # confirmed, the effect is.
+      - TZ=Europe/London

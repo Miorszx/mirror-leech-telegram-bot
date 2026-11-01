@@ -231,6 +231,14 @@ def resolve(link: str, budget: int = 230, headful: bool | None = None) -> str:
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                # Deliberately NOT forcing --use-gl / --use-angle. SwiftShader
+                # makes canvas.getContext("webgl") return a renderer, which looks
+                # like a fix, but Cloudflare fingerprints the software rasteriser
+                # and withholds the challenge: the iframe mounts with a broken
+                # src ("https://undefined/...") and #invisibleCaptchaShortlink
+                # stays disabled forever. Measured both ways on the same slug --
+                # without these flags the gate clears in ~3 s; with them it
+                # stalls until the budget expires.
             ],
         )
         ctx = None

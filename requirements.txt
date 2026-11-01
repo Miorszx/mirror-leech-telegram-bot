@@ -33,3 +33,4 @@ uvloop
 xattr
 gallery-dl
 yt-dlp[default,curl-cffi]
+patchright>=1.0
