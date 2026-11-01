@@ -81,9 +81,9 @@ _FAMILY = (
 _ENTRY = "https://shrinkme.click/{slug}"
 
 FILE_HOST_RE = re.compile(
-    r"(mediafire\.com/(file|download)|modsfire\.com|mega\.nz/|"
+    r"(?:^|//)(?:[\w-]+\.)*mediafire\.com/|modsfire\.com|mega\.nz/|"
     r"drive\.google\.com/file|pixeldrain\.com|gofile\.io|dropbox\.com/s/|"
-    r"krakenfiles|workupload)",
+    r"krakenfiles|workupload",
     re.I,
 )
 
@@ -186,10 +186,14 @@ def slug_from_url(link: str) -> str:
 
     The slug is case sensitive on the destination side but every family front
     door was verified case-insensitive, so it is passed through as written.
+
+    Fails when the last path segment is empty *or* is a known gate page: a URL
+    like ``shrinkme.click/themezon.net`` has a non-empty tail that is not a
+    slug, and treating it as one produces a confident 404 instead of an error.
     """
     tail = link.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-    if not tail:
-        raise DirectDownloadLinkException("ERROR: shortlink: empty slug")
+    if not tail or "." in tail:
+        raise DirectDownloadLinkException(f"ERROR: shortlink: no slug in {link!r}")
     return tail
 
 
